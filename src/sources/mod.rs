@@ -1,5 +1,6 @@
 //! Data sources feeding the dashboards.
 
+pub mod calendar;
 pub mod weather;
 
 /// Failure of a single source fetch.
