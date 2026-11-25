@@ -39,13 +39,13 @@ impl<T: Serialize + DeserializeOwned + Clone> SourceCache<T> {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    eprintln!("ignoring corrupt cache {}: {e}", path.display());
+                    tracing::warn!("ignoring corrupt cache {}: {e}", path.display());
                     None
                 }
             },
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => {
-                eprintln!("cannot read cache {}: {e}", path.display());
+                tracing::warn!("cannot read cache {}: {e}", path.display());
                 None
             }
         };
