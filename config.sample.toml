@@ -1,0 +1,41 @@
+timezone = "Europe/Warsaw"
+base_url = "http://nas.local:8080"      # what devices use to fetch images
+
+[schedule]
+wake = "06:00"
+sleep = "22:00"
+refresh_minutes = 15
+
+[[device]]
+name = "kitchen"
+mac = "AA:BB:CC:DD:EE:01"
+api_key_secret = "trmnl_kitchen_key"
+dashboard = "family"
+bit_depth = 2            # 2 (default) or 1
+
+[[device]]
+name = "office"
+mac = "AA:BB:CC:DD:EE:02"
+api_key_secret = "trmnl_office_key"
+dashboard = "homelab"
+
+[family]
+switch_at = "16:00"      # after this, the featured school day is the next one
+calendar_days = 7
+
+[family.calendar]
+ics_url_secret = "icloud_ics_url"  # public shared-calendar link (webcal:// -> https://)
+
+[[family.kid]]
+label = "Kid 1"                  # shown as the column heading
+librus_login_secret = "librus_kid1_login"
+librus_password_secret = "librus_kid1_password"
+
+[[family.kid]]
+label = "Kid 2"
+librus_login_secret = "librus_kid2_login"
+librus_password_secret = "librus_kid2_password"
+
+[family.weather]
+latitude = 52.0
+longitude = 21.0
