@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head><meta charset="utf-8"><title>Plan lekcji</title></head>
+<body>
+<form method="post" action="/przegladaj_plan_lekcji" enctype="multipart/form-data">
+  <select name="tydzien" onchange="this.form.submit();">
+    <option value="2026-11-16_2026-11-22">16.11.2026 - 22.11.2026</option>
+    <option value="2026-11-23_2026-11-29" selected="selected">23.11.2026 - 29.11.2026</option>
+    <option value="2026-11-30_2026-12-06">30.11.2026 - 06.12.2026</option>
+  </select>
+</form>
+<table class="decorated plan-lekcji">
+  <thead>
+    <tr><th>Godz.</th><th>Poniedziałek<br>2026-11-23</th><th>Wtorek<br>2026-11-24</th><th>Środa<br>2026-11-25</th><th>Czwartek<br>2026-11-26</th><th>Piątek<br>2026-11-27</th><th>Godz.</th></tr>
+  </thead>
+  <tbody>
+    <tr class="line1">
+      <td>1</td>
+      <th>8:00 - 8:45</th>
+      <td><div class="center"><div class="text"><b>Alchemia</b><br/>Jan Testowy s. 101</div></div></td>
+      <td></td>
+      <td><div class="center"><div class="text"><b>Ruchy</b><br/>Ewa Probna s. Sala&nbsp;gimn.</div></div></td>
+      <td><div class="center"><s><div class="text"><b>Latanie</b><br/>Ewa Probna s. 7</div></s><div class="plan-lekcji-info">odwołane</div></div></td>
+      <td></td>
+      <td>1</td>
+    </tr>
+    <tr class="line0"><td colspan="7">przerwa</td></tr>
+    <tr class="line1">
+      <td>2</td>
+      <th>08:55 - 09:40</th>
+      <td><div class="center"><div class="text"><b>Zielarstwo</b><br/>- Adam Przykladowy s. 12</div></div></td>
+      <td><div class="center"><s><div class="text"><b>Alchemia</b><br/>Jan Testowy s. 101</div></s><div class="text"><b>Alchemia</b><br/>Ola Zastepcza s. 102</div><div class="plan-lekcji-info">zastępstwo</div></div></td>
+      <td></td>
+      <td></td>
+      <td><div class="center"><div class="text"><b>Wróżbiarstwo</b><br/>Adam Przykladowy</div></div></td>
+      <td>2</td>
+    </tr>
+    <tr class="line1">
+      <td>3</td>
+      <th>9:50 - 10:35</th>
+      <td></td>
+      <td><div class="center"><div class="text"><b>Ruchy</b><br/>Ewa Probna s. 7</div></div></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td>3</td>
+    </tr>
+  </tbody>
+</table>
+</body>
+</html>
