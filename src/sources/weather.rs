@@ -1,6 +1,6 @@
 //! Open-Meteo forecast source.
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +19,27 @@ pub struct Weather {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Daily {
+    /// Local calendar day this entry forecasts. Caches written before this field
+    /// existed load with the epoch date, which never matches a real day, so the
+    /// view omits them until the next refresh (at most 30 minutes).
+    #[serde(default = "epoch")]
+    pub date: NaiveDate,
     pub max_c: f32,
     pub min_c: f32,
     pub condition: Condition,
+}
+
+fn epoch() -> NaiveDate {
+    NaiveDate::default()
+}
+
+impl Weather {
+    /// The daily entry for `date`, if the forecast covers it.
+    pub fn day(&self, date: NaiveDate) -> Option<&Daily> {
+        [&self.today, &self.tomorrow]
+            .into_iter()
+            .find(|d| d.date == date)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +86,7 @@ struct RawCurrent {
 
 #[derive(Deserialize)]
 struct RawDaily {
+    time: Vec<String>,
     weather_code: Vec<u16>,
     temperature_2m_max: Vec<f32>,
     temperature_2m_min: Vec<f32>,
@@ -86,11 +105,14 @@ pub fn parse(json: &str) -> Result<Weather, SourceError> {
     let d = &raw.daily;
     let day = |i: usize| -> Result<Daily, SourceError> {
         match (
+            d.time.get(i),
             d.weather_code.get(i),
             d.temperature_2m_max.get(i),
             d.temperature_2m_min.get(i),
         ) {
-            (Some(&code), Some(&max_c), Some(&min_c)) => Ok(Daily {
+            (Some(time), Some(&code), Some(&max_c), Some(&min_c)) => Ok(Daily {
+                date: NaiveDate::parse_from_str(time, "%Y-%m-%d")
+                    .map_err(|e| SourceError::Parse(format!("bad daily date {time:?}: {e}")))?,
                 max_c,
                 min_c,
                 condition: condition_from_wmo(code),
@@ -197,13 +219,31 @@ mod tests {
         assert_eq!(w.current_temp_c, expected);
         assert_eq!(w.hourly.len(), 48);
         assert!(w.today.max_c >= w.today.min_c);
+        assert_eq!(w.today.date, NaiveDate::from_ymd_opt(2026, 11, 25).unwrap());
+        assert_eq!(
+            w.tomorrow.date,
+            NaiveDate::from_ymd_opt(2026, 11, 26).unwrap()
+        );
+        assert_eq!(w.day(w.tomorrow.date), Some(&w.tomorrow));
+        assert_eq!(w.day(NaiveDate::from_ymd_opt(2026, 11, 27).unwrap()), None);
+    }
+
+    #[test]
+    fn old_cache_without_dates_still_loads_but_matches_no_day() {
+        let w = parse(FIXTURE).unwrap();
+        let mut v = serde_json::to_value(&w).unwrap();
+        v["today"].as_object_mut().unwrap().remove("date");
+        v["tomorrow"].as_object_mut().unwrap().remove("date");
+        let old: Weather = serde_json::from_value(v).unwrap();
+        assert_eq!(old.day(w.today.date), None);
+        assert_eq!(old.day(w.tomorrow.date), None);
     }
 
     #[test]
     fn precip_kind_from_hourly_code() {
         let json = r#"{
             "current": {"temperature_2m": -1.0, "weather_code": 73},
-            "daily": {"weather_code": [73, 3], "temperature_2m_max": [0.0, 2.0], "temperature_2m_min": [-3.0, -1.0]},
+            "daily": {"time": ["2026-01-05", "2026-01-06"], "weather_code": [73, 3], "temperature_2m_max": [0.0, 2.0], "temperature_2m_min": [-3.0, -1.0]},
             "hourly": {"time": ["2026-01-05T08:00", "2026-01-05T09:00"],
                        "precipitation_probability": [80, null],
                        "weather_code": [73, 61]}

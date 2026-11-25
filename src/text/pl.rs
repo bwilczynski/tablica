@@ -66,8 +66,13 @@ pub fn day_label(d: NaiveDate, today: NaiveDate) -> String {
 pub fn day_short(d: NaiveDate, today: NaiveDate) -> String {
     match relative(d, today) {
         Some(s) => s.to_string(),
-        None => WEEKDAYS_SHORT[weekday_idx(d)].to_string(),
+        None => weekday_short(d).to_string(),
     }
+}
+
+/// Abbreviated weekday, never relative: "czw.".
+pub fn weekday_short(d: NaiveDate) -> &'static str {
+    WEEKDAYS_SHORT[weekday_idx(d)]
 }
 
 fn relative(d: NaiveDate, today: NaiveDate) -> Option<&'static str> {
@@ -137,9 +142,51 @@ pub fn stale(at: DateTime<Tz>, today: NaiveDate) -> String {
     }
 }
 
+/// Short on-screen tag for a Librus lesson note, or `None` when nothing needs
+/// showing: cancelled lessons are already struck through.
+pub fn lesson_flag(raw: &str) -> Option<String> {
+    let parts: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.iter().any(|p| p.to_lowercase() == "zastępstwo") {
+        return Some("zast.".to_owned());
+    }
+    let first = parts
+        .iter()
+        .find(|p| p.to_lowercase() != "odwołane")?
+        .split_whitespace()
+        .next()?;
+    if first.chars().count() > 8 {
+        Some(format!("{}.", first.chars().take(8).collect::<String>()))
+    } else {
+        Some(first.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lesson_flags_are_short() {
+        assert_eq!(lesson_flag("zastępstwo").as_deref(), Some("zast."));
+        assert_eq!(lesson_flag("Zastępstwo").as_deref(), Some("zast."));
+        assert_eq!(
+            lesson_flag("odwołane, zastępstwo").as_deref(),
+            Some("zast.")
+        );
+        assert_eq!(lesson_flag("odwołane"), None);
+        assert_eq!(lesson_flag("Odwołane"), None);
+        assert_eq!(lesson_flag("  "), None);
+        assert_eq!(
+            lesson_flag("przeniesione na wtorek").as_deref(),
+            Some("przenies.")
+        );
+        assert_eq!(lesson_flag("zmiana").as_deref(), Some("zmiana"));
+        assert_eq!(lesson_flag("12345678").as_deref(), Some("12345678"));
+    }
     use crate::text::{Condition, PrecipKind};
     use chrono::{NaiveDate, NaiveTime, TimeZone};
     use chrono_tz::Europe::Warsaw;
@@ -183,6 +230,7 @@ mod tests {
         assert_eq!(day_short(d(2026, 11, 26), today), "czw.");
         assert_eq!(day_short(today, today), "Dziś");
         assert_eq!(day_short(d(2026, 11, 25), today), "Jutro");
+        assert_eq!(weekday_short(d(2026, 11, 25)), "śr.");
         let names = ["pon.", "wt.", "śr.", "czw.", "pt.", "sob.", "niedz."];
         for (i, n) in names.iter().enumerate() {
             assert_eq!(day_short(d(2026, 12, 7 + i as u32), today), *n);
