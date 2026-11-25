@@ -1,0 +1,69 @@
+<style>
+  * { box-sizing: border-box; }
+  .root { width: 800px; height: 480px; background: #fff; color: #000; font-family: "Inter"; font-size: 15px; line-height: 1.25; display: flex; flex-direction: column; overflow: hidden; }
+  .hdr { background: #aaa; display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #000; padding: 8px 16px; height: 64px; flex-shrink: 0; }
+  .date { font-size: 30px; font-weight: 700; }
+  .wx { display: flex; align-items: center; gap: 10px; }
+  .ico { width: 40px; height: 40px; }
+  .temp { font-size: 34px; font-weight: 700; }
+  .wxt { display: flex; flex-direction: column; }
+  .small { font-size: 12px; }
+  .body { display: flex; flex: 1; min-height: 0; }
+  .col { padding: 10px 14px; display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+  .vr { border-left: 2px solid #000; }
+  .h4 { font-size: 13px; font-weight: 700; letter-spacing: 1px; border-bottom: 2px solid #000; padding-bottom: 3px; margin-bottom: 4px; }
+  .day { font-weight: 700; font-size: 14px; margin-top: 7px; margin-bottom: 2px; }
+  .ev { display: flex; gap: 8px; margin-bottom: 3px; }
+  .t { width: 84px; white-space: nowrap; font-weight: 700; flex-shrink: 0; }
+  .ttl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .focus { background: #aaa; color: #000; padding: 3px 6px; margin: 4px 0; font-weight: 700; }
+  .row { display: flex; align-items: center; border-bottom: 1px solid #000; padding: 3px 4px; }
+  .hr { width: 44px; font-size: 12px; flex-shrink: 0; padding-top: 2px; }
+  .subj { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .x { text-decoration: line-through; }
+  .tag { background: #000; color: #fff; padding: 0 5px; font-weight: 700; font-size: 12px; margin-left: 6px; flex-shrink: 0; white-space: nowrap; }
+</style>
+<div class="root">
+  <div class="hdr">
+    <div class="date">{{ header.date }}</div>
+    <div class="wx">
+      {% if header.icon %}<div class="ico">{% include "icons/" ~ header.icon ~ ".svg" %}</div>{% endif %}
+      {% if header.temp %}<div class="temp">{{ header.temp }}</div>{% endif %}
+      <div class="wxt">
+        {% if header.condition %}<div>{{ header.condition }}</div>{% endif %}
+        {% if header.detail %}<div class="small">{{ header.detail }}</div>{% endif %}
+        {% if header.note %}<div class="small">{{ header.note }}</div>{% endif %}
+      </div>
+    </div>
+  </div>
+  <div class="body">
+    <div class="col" style="width: 280px;">
+      <div class="h4">{{ calendar.heading }}</div>
+      {% for day in calendar.days %}
+      <div class="day">{{ day.label }}</div>
+      {% for ev in day.events %}
+      <div class="ev"><div class="t">{{ ev.time }}</div><div class="ttl">{{ ev.title }}</div></div>
+      {% endfor %}
+      {% endfor %}
+      {% if calendar.more %}<div class="day">{{ calendar.more }}</div>{% endif %}
+      {% if calendar.note %}<div class="small">{{ calendar.note }}</div>{% endif %}
+    </div>
+    {% for kid in kids %}
+    <div class="col vr" style="width: {{ 520 // (kids | length) }}px;">
+      <div class="h4">{{ kid.label }}</div>
+      {% if kid.featured %}
+      <div class="focus">{{ kid.featured.title }}</div>
+      {% for l in kid.featured.lessons %}
+      <div class="row"><div class="hr">{{ l.time }}</div><div class="subj{% if l.cancelled %} x{% endif %}">{{ l.subject }}</div>{% if l.flag %}<div class="tag">{{ l.flag }}</div>{% endif %}</div>
+      {% endfor %}
+      {% endif %}
+      {% if kid.summary %}
+      <div class="day">{{ kid.summary.title }}</div>
+      {% if kid.summary.subjects %}<div class="small">{{ kid.summary.subjects }}</div>{% endif %}
+      {% endif %}
+      {% if kid.empty %}<div class="day">{{ kid.empty }}</div>{% endif %}
+      {% if kid.note %}<div class="small">{{ kid.note }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
