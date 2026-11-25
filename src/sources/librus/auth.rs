@@ -591,7 +591,18 @@ pub(crate) mod tests {
             .await;
         h.mount_tail(ResponseTemplate::new(200).set_body_string("<html>ok</html>"))
             .await;
-        client(&h).login(LOGIN, PASSWORD, None).await.unwrap();
+        // Mirrors the real trace: the 2FA hop redirects onward, the chain ends on
+        // a 200 at portalRodzina?code=.
+        let mut trace = Vec::new();
+        client(&h)
+            .login(LOGIN, PASSWORD, Some(&mut trace))
+            .await
+            .unwrap();
+        assert_eq!(trace.len(), 6, "{trace:#?}");
+        assert!(trace[4].url.contains("/OAuth/Authorization/2FA"));
+        assert_eq!(trace[4].status, 302);
+        assert!(trace[5].url.contains("/loguj/portalRodzina?code="));
+        assert_eq!(trace[5].status, 200);
     }
 
     #[tokio::test]

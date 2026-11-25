@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::Context;
 
 use super::auth::{Exchange, LibrusClient, LibrusUrls};
-use super::timetable::week_options;
+use super::timetable::{teacher_names, week_options};
 use crate::config::{Config, KidConfig};
 
 const REDACTED: &str = "<redacted>";
@@ -39,9 +39,9 @@ pub async fn capture_with_urls(cfg: &Config, out: &Path, urls: &LibrusUrls) -> a
         println!("kid {n}: wrote {}", dir.display());
     }
     println!(
-        "\nReview every file under {} before committing it. Only the login, the password \
-         and cookie values are scrubbed: names of kids, teachers and the school may still \
-         be in there.",
+        "\nReview every file under {} before committing it. The login, password, cookies, \
+         session tokens, teacher names and school codes are scrubbed; kids' names, rooms \
+         and the timetable itself are not.",
         out.display()
     );
     Ok(())
@@ -71,29 +71,110 @@ async fn capture_kid(kid: &KidConfig, dir: &Path, urls: &LibrusUrls) -> anyhow::
     }
     login.with_context(|| format!("login failed; trace written to {}", dir.display()))?;
 
+    // Both pages stay in memory until every teacher on them is known, so no
+    // file with a real name in it is ever written.
     let current = client
         .timetable_page(None)
         .await
         .context("fetching the current week")?;
-    write(&dir.join("timetable-current.html"), &scrub.text(&current))?;
-
+    let current = scrub.text(&current);
+    let mut teachers = Vec::new();
+    add_teachers(&current, &mut teachers);
     let options = week_options(&current);
-    let next = options
+    let next_week = options
         .iter()
         .position(|(_, selected)| *selected)
         .and_then(|i| options.get(i + 1));
-    match next {
-        Some((week, _)) => {
-            let html = client
-                .timetable_page(Some(week))
-                .await
-                .with_context(|| format!("fetching week {week}"))?;
-            write(&dir.join("timetable-next.html"), &scrub.text(&html))?;
-        }
+    let mut pages = vec![("timetable-current.html", current.clone())];
+    let mut failure = None;
+    match next_week {
+        Some((week, _)) => match client.timetable_page(Some(week)).await {
+            Ok(html) => {
+                let html = scrub.text(&html);
+                add_teachers(&html, &mut teachers);
+                pages.push(("timetable-next.html", html));
+            }
+            Err(e) => {
+                failure = Some(anyhow::Error::new(e).context(format!("fetching week {week}")));
+            }
+        },
         None => eprintln!(
             "warning: {}: no week option after the selected one; skipped the next week",
             dir.display()
         ),
+    }
+    let labels = teacher_labels(&teachers);
+    for (name, html) in &pages {
+        write(&dir.join(name), &relabel(html, &labels))?;
+    }
+    // The trace files are already on disk; names can appear there too.
+    scrub_teachers(dir, &labels)?;
+    failure.map_or(Ok(()), Err)
+}
+
+/// Adds the teacher names on a timetable page (struck lessons and tooltips too),
+/// first seen first. Already-scrubbed `Nauczyciel N` values are skipped.
+fn add_teachers(html: &str, names: &mut Vec<String>) {
+    for name in teacher_names(html) {
+        let scrubbed = name
+            .strip_prefix("Nauczyciel ")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if !scrubbed && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+}
+
+/// "Surname Firstname" and "Firstname Surname" are the same teacher.
+fn teacher_key(name: &str) -> Vec<String> {
+    let mut words: Vec<String> = name.split_whitespace().map(str::to_lowercase).collect();
+    words.sort();
+    words
+}
+
+/// `(name, "Nauczyciel N")` for every teacher (N from 1 in order of first
+/// appearance; word order doesn't matter), longest name first so a name
+/// containing another isn't left half replaced.
+fn teacher_labels(names: &[String]) -> Vec<(String, String)> {
+    let mut keys: Vec<Vec<String>> = Vec::new();
+    let mut labelled: Vec<(String, String)> = Vec::new();
+    for name in names {
+        let key = teacher_key(name);
+        let n = keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+            keys.push(key);
+            keys.len() - 1
+        });
+        labelled.push((name.clone(), format!("Nauczyciel {}", n + 1)));
+    }
+    labelled.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    labelled
+}
+
+/// Replaces every teacher name in `text` with its label.
+fn relabel(text: &str, labels: &[(String, String)]) -> String {
+    let mut text = text.to_owned();
+    for (name, label) in labels {
+        text = text.replace(name.as_str(), label);
+        // The page may spell the gaps as `&nbsp;`.
+        text = text.replace(&name.replace(' ', "&nbsp;"), label);
+    }
+    text
+}
+
+/// Relabels teacher names in every file under `dir`.
+fn scrub_teachers(dir: &Path, labels: &[(String, String)]) -> anyhow::Result<()> {
+    if labels.is_empty() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        write(&path, &relabel(&text, labels))?;
     }
     Ok(())
 }
@@ -150,7 +231,7 @@ impl Scrubber {
             .replacements
             .iter()
             .fold(s.to_owned(), |acc, (needle, rep)| acc.replace(needle, rep));
-        redact_oauth_params(&s)
+        scrub_school_codes(&redact_session_secrets(&s))
     }
 
     fn exchange(&self, ex: &Exchange) -> String {
@@ -167,6 +248,132 @@ impl Scrubber {
         out.push_str(&ex.body);
         self.text(&out)
     }
+}
+
+/// School identifier prefixes, longest first.
+const SCHOOL_PREFIXES: [&str; 9] = ["CKZiU", "ZSO", "ZSP", "XLO", "SP", "LO", "ZS", "PG", "G"];
+
+const SCHOOL_NAME_SCRUBBED: &str = "Szkoła Podstawowa nr 000";
+const SCHOOL_NAME_WORDS: [&str; 3] = ["szkoła", "podstawowa", "nr"];
+
+/// Byte length of a case-insensitive `Szkoła Podstawowa nr <digits>` (`ł` may be
+/// spelled `l`) at the start of `text`, if there is one.
+fn school_name_len(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices().peekable();
+    for (w, word) in SCHOOL_NAME_WORDS.iter().enumerate() {
+        for want in word.chars() {
+            let (_, c) = chars.next()?;
+            let c = c.to_lowercase().next()?;
+            if !(c == want || (want == 'ł' && c == 'l')) {
+                return None;
+            }
+        }
+        let (_, sp) = chars.next()?;
+        if w < 2 && sp != ' ' || w == 2 && sp != ' ' {
+            return None;
+        }
+    }
+    let mut end = None;
+    while let Some(&(i, c)) = chars.peek() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        end = Some(i + 1);
+        chars.next();
+    }
+    let end = end?;
+    (!text[end..]
+        .chars()
+        .next()
+        .is_some_and(char::is_alphanumeric))
+    .then_some(end)
+}
+
+/// Replaces school codes such as `SP123` or `LO 5` with the prefix plus `000`.
+/// A code is a prefix at a word start, an optional space (not for a bare `G`) and
+/// digits that end at a word boundary.
+pub(crate) fn scrub_school_codes(text: &str) -> String {
+    scrub_class_labels(&scrub_school_ids(text))
+}
+
+fn scrub_school_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    'outer: while i < text.len() {
+        let rest = &text[i..];
+        let word_start = !text[..i]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        if word_start && let Some(len) = school_name_len(rest) {
+            out.push_str(SCHOOL_NAME_SCRUBBED);
+            i += len;
+            continue;
+        }
+        if word_start {
+            for p in SCHOOL_PREFIXES {
+                let Some(after) = rest.strip_prefix(p) else {
+                    continue;
+                };
+                let after = match after.strip_prefix(' ') {
+                    Some(a) if p.len() > 1 => a,
+                    _ => after,
+                };
+                let digits = after.chars().take_while(char::is_ascii_digit).count();
+                let next = after[digits..].chars().next();
+                if digits > 0 && !next.is_some_and(char::is_alphanumeric) {
+                    out.push_str(p);
+                    out.push_str("000");
+                    i = text.len() - after.len() + digits;
+                    continue 'outer;
+                }
+            }
+        }
+        let c = rest.chars().next().expect("non-empty");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Whether the text before the cursor is inside a `Klasa:</b>` tooltip line.
+fn in_class_line(before: &str) -> bool {
+    let line_start = before.rfind("<br").map_or(0, |i| i + 3);
+    before[line_start..].contains("Klasa:</b>")
+}
+
+/// Replaces class labels (a digit 1-8 and one letter, as a whole word) with `0x`,
+/// keeping the letter's case. Only in the shapes Librus puts them in: after
+/// `Klasa:</b> `, after `-> ` inside a `Klasa:</b>` line (up to the next `<br`), and in `(<class> grupa …)`. Other tokens such as
+/// room numbers (`1A`) are left alone.
+fn scrub_class_labels(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let before = &text[..i];
+        let rest = &text[i..];
+        let mut chars = rest.chars();
+        if let (Some(d), Some(l)) = (chars.next(), chars.next())
+            && ('1'..='8').contains(&d)
+            && l.is_ascii_alphabetic()
+        {
+            let after = &rest[2..];
+            let whole = !after.chars().next().is_some_and(char::is_alphanumeric);
+            let context = before.ends_with("Klasa:</b> ")
+                || (before.ends_with("-> ") && in_class_line(before))
+                || (before.ends_with('(') && after.starts_with(" grupa"));
+            if whole && context {
+                out.push('0');
+                out.push(if l.is_ascii_uppercase() { 'X' } else { 'x' });
+                i += 2;
+                continue;
+            }
+        }
+        let c = rest.chars().next().expect("non-empty");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// `name` and `value` of a `Set-Cookie` header.
@@ -190,7 +397,9 @@ fn redact_set_cookie(header: &str) -> String {
 }
 
 /// OAuth parameters whose values never reach a fixture.
-const OAUTH_PARAMS: [&str; 2] = ["code", "state"];
+/// Query parameters and `<input>` names whose values are secrets: the OAuth
+/// `code`/`state` and Synergia's CSRF `requestkey`.
+const SECRET_PARAMS: [&str; 3] = ["code", "state", "requestkey"];
 
 /// Replaces OAuth `code` and `state` values with `<redacted>` anywhere in `text`:
 /// URL query parameters (after `?`, `&`, `&amp;` or JSON-escaped `\u0026`) and
@@ -199,12 +408,54 @@ fn redact_oauth_params(text: &str) -> String {
     redact_oauth_inputs(&redact_oauth_query(text))
 }
 
+/// Every session secret capture knows how to find in page text: OAuth
+/// parameters, the CSRF `requestkey` input and the page's `csrfTokenValue`.
+/// Applying it to already-redacted text changes nothing.
+pub(crate) fn redact_session_secrets(text: &str) -> String {
+    redact_csrf_js(&redact_oauth_params(text))
+}
+
+/// Redacts the string assigned to `csrfTokenValue` in the page's script.
+fn redact_csrf_js(text: &str) -> String {
+    const NAME: &str = "csrfTokenValue";
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(off) = text[i..].find(NAME) {
+        let after = i + off + NAME.len();
+        out.push_str(&text[i..after]);
+        i = after;
+        let rest = &text[after..];
+        let eq = rest.len() - rest.trim_start().len();
+        if !rest[eq..].starts_with('=') {
+            continue;
+        }
+        let rest2 = &rest[eq + 1..];
+        let q_off = eq + 1 + (rest2.len() - rest2.trim_start().len());
+        let Some(quote) = rest[q_off..]
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '"' | '\''))
+        else {
+            continue;
+        };
+        let body_start = after + q_off + 1;
+        let Some(len) = text[body_start..].find(quote) else {
+            continue;
+        };
+        out.push_str(&text[after..body_start]);
+        out.push_str(REDACTED);
+        i = body_start + len;
+    }
+    out.push_str(&text[i..]);
+    out
+}
+
 fn redact_oauth_query(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
         let rest = &text[i..];
-        let param = OAUTH_PARAMS.iter().find(|p| {
+        let param = SECRET_PARAMS.iter().find(|p| {
             rest.strip_prefix(**p).is_some_and(|r| r.starts_with('='))
                 && (i == 0 || {
                     let before = &text[..i];
@@ -212,6 +463,12 @@ fn redact_oauth_query(text: &str) -> String {
                 })
         });
         match param {
+            Some(p) if text[i + p.len() + 1..].starts_with(REDACTED) => {
+                // Already redacted: copy it as is.
+                let end = i + p.len() + 1 + REDACTED.len();
+                out.push_str(&text[i..end]);
+                i = end;
+            }
             Some(p) => {
                 let value_start = i + p.len() + 1;
                 let value_len = text[value_start..]
@@ -250,7 +507,7 @@ fn redact_oauth_inputs(text: &str) -> String {
 }
 
 fn redact_input_tag(tag: &str, lower: &str) -> String {
-    let named = OAUTH_PARAMS.iter().any(|p| {
+    let named = SECRET_PARAMS.iter().any(|p| {
         lower.contains(&format!("name=\"{p}\"")) || lower.contains(&format!("name='{p}'"))
     });
     // `value=` as its own attribute, not the tail of e.g. `data-value=`.
@@ -271,6 +528,10 @@ fn redact_input_tag(tag: &str, lower: &str) -> String {
         _ => (0, &[' ', '\t', '\n', '/']),
     };
     let body_start = value_start + open;
+    // Already redacted (the tag was cut at the `>` inside the marker).
+    if tag[body_start..].starts_with(&REDACTED[..REDACTED.len() - 1]) {
+        return tag.to_owned();
+    }
     let body_end = tag[body_start..]
         .find(close)
         .map_or(tag.len(), |e| body_start + e);
@@ -293,6 +554,64 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn scrubs_class_labels() {
+        let f = super::scrub_school_codes;
+        assert_eq!(
+            f("<b>Klasa:</b> 5c grupa 1 -> 5C SP123"),
+            "<b>Klasa:</b> 0x grupa 1 -> 0X SP000"
+        );
+        assert_eq!(f("Klasa:</b> 5C SP12"), "Klasa:</b> 0X SP000");
+        assert_eq!(
+            f("Name&nbsp;(5c grupa 1)&nbsp&nbsp;s.&nbsp;1A"),
+            "Name&nbsp;(0x grupa 1)&nbsp&nbsp;s.&nbsp;1A"
+        );
+        // `->` outside a class line stays: rooms and subjects can look like classes.
+        assert_eq!(f("<b>Sala:</b> 15 -> 1A"), "<b>Sala:</b> 15 -> 1A");
+        assert_eq!(
+            f("<b>Przedmiot:</b> Fizyka -> 2b"),
+            "<b>Przedmiot:</b> Fizyka -> 2b"
+        );
+        assert_eq!(f("1A -> 2B"), "1A -> 2B");
+        assert_eq!(
+            f("<b>Klasa:</b> 5c -> 5C<br><b>Sala:</b> 1A -> 2B"),
+            "<b>Klasa:</b> 0x -> 0X<br><b>Sala:</b> 1A -> 2B"
+        );
+        // Other tokens stay: rooms, other parentheses, longer words, out of range.
+        assert_eq!(
+            f("s.&nbsp;1A H1 (2b) 9a -> 9a x 8bc"),
+            "s.&nbsp;1A H1 (2b) 9a -> 9a x 8bc"
+        );
+        // Idempotent.
+        let once = f("Klasa:</b> 5c grupa 1 -> 5C SP1 (7c grupa 2)");
+        assert_eq!(f(&once), once);
+    }
+
+    #[test]
+    fn scrubs_school_codes() {
+        assert_eq!(
+            super::scrub_school_codes("5C SP123, <b>Klasa:</b> SP 12 -> LO7."),
+            "5C SP000, <b>Klasa:</b> SP000 -> LO000."
+        );
+        assert_eq!(
+            super::scrub_school_codes("<td>SZKOŁA PODSTAWOWA NR 5, Szkola Podstawowa nr 12.</td>"),
+            "<td>Szkoła Podstawowa nr 000, Szkoła Podstawowa nr 000.</td>"
+        );
+        assert_eq!(
+            super::scrub_school_codes("Szkoła Podstawowa nr 000"),
+            "Szkoła Podstawowa nr 000"
+        );
+        assert_eq!(
+            super::scrub_school_codes("Szkoła Podstawowa nr x"),
+            "Szkoła Podstawowa nr x"
+        );
+        // Not codes: no digits, glued letters, inside a word, bare G with a space.
+        assert_eq!(
+            super::scrub_school_codes("SPORT SP1a XSP1 G 5 G5 id=1"),
+            "SPORT SP1a XSP1 G 5 G000 id=1"
+        );
+    }
+
+    #[test]
     fn redacts_code_and_state_query_values() {
         assert_eq!(
             super::redact_oauth_params("https://h/p?client_id=46&state=xyz&code=a1#f"),
@@ -303,6 +622,26 @@ mod tests {
             "/p?code=<redacted>&response_type=code"
         );
         assert_eq!(super::redact_oauth_params("/p?zipcode=1"), "/p?zipcode=1");
+    }
+
+    #[test]
+    fn redacts_csrf_tokens() {
+        let page = r#"<script>
+            var csrfTokenName = "requestkey";
+            var csrfTokenValue = "MC4xSECRETVALUE";
+            var other = csrfTokenValue;
+        </script>
+        <form><input type="hidden" name="requestkey" value="MC4xSECRETVALUE" /></form>
+        <a href="/x?requestkey=MC4xSECRETVALUE&y=1">x</a>"#;
+        let out = redact_session_secrets(page);
+        assert!(!out.contains("SECRETVALUE"), "{out}");
+        assert!(out.contains(r#"csrfTokenValue = "<redacted>";"#), "{out}");
+        assert!(
+            out.contains(r#"name="requestkey" value="<redacted>""#),
+            "{out}"
+        );
+        assert!(out.contains("var other = csrfTokenValue;"), "{out}");
+        assert_eq!(redact_session_secrets(&out), out, "idempotent");
     }
 
     #[test]
@@ -545,5 +884,137 @@ mod tests {
             "{err:#}"
         );
         assert!(out.path().join("kid1/04-POST-127.0.0.1.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn capture_scrubs_teacher_names() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        h.mount_post_redirect("/OAuth/Authorization/2FA?client_id=46")
+            .await;
+        h.mount_tail(ResponseTemplate::new(302).insert_header("Location", "/rodzic/index"))
+            .await;
+        let week = include_str!("../../../tests/fixtures/librus/handmade/week.html");
+        let next = week
+            .replace(
+                "2026-11-23_2026-11-29\" selected=\"selected\"",
+                "2026-11-23_2026-11-29\"",
+            )
+            .replace(
+                "2026-11-30_2026-12-06\"",
+                "2026-11-30_2026-12-06\" selected=\"selected\"",
+            )
+            .replace("Jan Testowy", "Nowa Nauczycielka");
+        // A teacher who appears only in a struck lesson.
+        let week = week.replace(
+            "Jan Testowy s. 101</div></s>",
+            "Skreslony Nauczyciel s. 101</div></s>",
+        );
+        let week = week.as_str();
+        Mock::given(method("GET"))
+            .and(path("/przegladaj_plan_lekcji"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(week))
+            .mount(&h.synergia)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/przegladaj_plan_lekcji"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(next))
+            .mount(&h.synergia)
+            .await;
+
+        let out = tempfile::tempdir().unwrap();
+        capture_with_urls(&config(), out.path(), &h.urls())
+            .await
+            .unwrap();
+        let kid = out.path().join("kid1");
+        let current = std::fs::read_to_string(kid.join("timetable-current.html")).unwrap();
+        let next = std::fs::read_to_string(kid.join("timetable-next.html")).unwrap();
+        for name in [
+            "Jan Testowy",
+            "Ewa Probna",
+            "Adam Przykladowy",
+            "Ola Zastepcza",
+            "Nowa Nauczycielka",
+            "Skreslony Nauczyciel",
+        ] {
+            assert!(!current.contains(name) && !next.contains(name), "{name}");
+        }
+        // Numbered in document order of first appearance, stable across both pages.
+        assert!(current.contains("<b>Alchemia</b><br/>Nauczyciel 1 s. 101"));
+        assert!(current.contains("<b>Ruchy</b><br/>Nauczyciel 2 s. Sala&nbsp;gimn."));
+        assert!(current.contains("- Nauczyciel 3 s. 12"));
+        assert!(current.contains("Nauczyciel 4 s. 101</div></s>")); // struck-only
+        assert!(current.contains("Nauczyciel 5 s. 102"));
+        assert!(next.contains("Nauczyciel 2 s. 7"));
+        assert!(next.contains("<br/>Nauczyciel 6 s. 101"));
+    }
+
+    #[tokio::test]
+    async fn capture_scrubs_current_week_when_next_fetch_fails() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        h.mount_post_redirect("/OAuth/Authorization/2FA?client_id=46")
+            .await;
+        h.mount_tail(ResponseTemplate::new(302).insert_header("Location", "/rodzic/index"))
+            .await;
+        let week = include_str!("../../../tests/fixtures/librus/handmade/week.html");
+        Mock::given(method("GET"))
+            .and(path("/przegladaj_plan_lekcji"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(week))
+            .mount(&h.synergia)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/przegladaj_plan_lekcji"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&h.synergia)
+            .await;
+
+        let out = tempfile::tempdir().unwrap();
+        let err = capture_with_urls(&config(), out.path(), &h.urls())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("fetching week"), "{err:#}");
+        let current =
+            std::fs::read_to_string(out.path().join("kid1/timetable-current.html")).unwrap();
+        assert!(!current.contains("Jan Testowy") && !current.contains("Ewa Probna"));
+        assert!(current.contains("Nauczyciel 1"));
+    }
+
+    #[tokio::test]
+    async fn capture_scrubs_tooltip_teachers_and_school_codes() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        h.mount_post_redirect("/OAuth/Authorization/2FA?client_id=46")
+            .await;
+        h.mount_tail(ResponseTemplate::new(302).insert_header("Location", "/rodzic/index"))
+            .await;
+        let page = r#"<select name="tydzien"><option value="2026-11-23_2026-11-29" selected>x</option></select>
+<table class="decorated plan-lekcji"><tr class="line1"><td>1</td><th>8:00 - 8:45</th>
+<td><a href="javascript:void(0);" title="<b>Klasa:</b> 5c grupa 1 -> 5C SP123<br><b>Nauczyciel:</b> Przykladowy Jan -> Testowa Ewa<br>"></a>
+<div class="text"><b>X</b><br/>- Ewa Testowa&nbsp&nbsp;s.&nbsp;3</div></td><td>1</td></tr></table>"#;
+        Mock::given(method("GET"))
+            .and(path("/przegladaj_plan_lekcji"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(page))
+            .mount(&h.synergia)
+            .await;
+        let out = tempfile::tempdir().unwrap();
+        capture_with_urls(&config(), out.path(), &h.urls())
+            .await
+            .unwrap();
+        let cur = std::fs::read_to_string(out.path().join("kid1/timetable-current.html")).unwrap();
+        assert!(
+            !cur.contains("Przykladowy") && !cur.contains("Testowa"),
+            "{cur}"
+        );
+        assert!(!cur.contains("SP123") && cur.contains("0X SP000"), "{cur}");
+        // Both name orders are one teacher.
+        assert!(
+            cur.contains("Nauczyciel:</b> Nauczyciel 1 -> Nauczyciel 2"),
+            "{cur}"
+        );
+        assert!(
+            cur.contains("Nauczyciel 2 s. 3") || cur.contains("Nauczyciel 2&nbsp&nbsp;s."),
+            "{cur}"
+        );
     }
 }
