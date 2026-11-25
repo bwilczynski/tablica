@@ -169,15 +169,18 @@ docs.trmnl.com/go/diy/byos, and the builder must check them against that page.
 - **`GET /api/display`:** the device authenticates with the `Access-Token` header, which
   must match a configured `api_key`. The server:
   1. renders the device's dashboard for "now"
-  2. stores the PNG in memory under its content hash
-  3. replies with `{ image_url: "<base>/images/<hash>.png", filename: "<hash>",
+  2. stores the PNG in memory, keyed by its content hash
+  3. replies with `{ image_url: "<base>/images/<filename>.png", filename: "<filename>",
      refresh_rate: <seconds>, update_firmware: false, reset_firmware: false }`
 
-  The `filename` changes only when the pixels change, so the device skips redraws when
-  nothing has changed. Battery, RSSI, firmware version and the other telemetry headers
+  The `filename` is `<dashboard>-<device id>-<unix time>`. Its first 13 characters
+  never change for a device's dashboard, because the firmware uses them to recognise
+  older images of the same screen and delete them. It changes only when the pixels
+  change, so the device skips redraws when nothing has changed. Battery, RSSI, firmware version and the other telemetry headers
   are logged at debug level.
-- **`POST /api/log`:** the request body is logged and the server replies 204.
-- **`GET /images/{hash}.png`:** serves the stored PNG with `Content-Type: image/png`.
+- **`POST /api/log`:** with a valid `Access-Token`, the request body is logged and the
+  server replies 204; without one it replies 401 and logs nothing.
+- **`GET /images/{filename}.png`:** serves the stored PNG with `Content-Type: image/png`.
   The server keeps the last N images for each device.
 - **`GET /preview/{dashboard}.png`:** for development and checking.
   - It accepts optional `at=<RFC3339>` (pretend it's that time) and `depth=1|2`.
