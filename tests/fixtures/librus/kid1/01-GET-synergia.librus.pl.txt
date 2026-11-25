@@ -1,0 +1,17 @@
+GET https://synergia.librus.pl/loguj/portalRodzina
+status: 302
+
+date: Wed, 25 Nov 2026 21:56:27 GMT
+x-frame-options: deny
+expires: Thu, 19 Nov 1981 08:52:00 GMT
+cache-control: no-store, no-cache, must-revalidate
+pragma: no-cache
+set-cookie: SDZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=Lax
+set-cookie: DZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=None
+set-cookie: SDZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=Lax
+set-cookie: oauth_state=<redacted>; expires=Wed, 25 Nov 2026 22:56:27 GMT; Max-Age=3600; path=/; secure; HttpOnly
+location: https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata&state=<redacted><redacted>
+x-apache: dziennik10
+content-length: 0
+content-type: text/html; charset=UTF-8
+

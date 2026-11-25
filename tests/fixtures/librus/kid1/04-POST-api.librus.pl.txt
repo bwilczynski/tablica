@@ -1,0 +1,21 @@
+POST https://api.librus.pl/OAuth/Authorization?client_id=46
+status: 200
+
+date: Wed, 25 Nov 2026 21:56:27 GMT
+x-frame-options: allow-from https://portal.librus.pl
+content-security-policy: frame-ancestors 'self' https://portal.librus.pl
+permissions-policy: publickey-credentials-get=(self "https://portal.librus.pl")
+access-control-max-age: 600
+access-control-allow-methods: GET,POST,OPTIONS
+access-control-allow-headers: Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Librus-Client-Id
+access-control-allow-origin: https://portal.librus.pl
+expires: Thu, 19 Nov 1981 08:52:00 GMT
+pragma: no-cache
+cache-control: no-store
+set-cookie: DZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=None
+vary: Accept-Encoding
+x-apache: dziennik10
+content-type: application/json
+content-length: 65
+
+{"status":"ok","goTo":"\/OAuth\/Authorization\/2FA?client_id=46"}
