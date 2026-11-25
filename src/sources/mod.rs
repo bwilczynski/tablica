@@ -15,6 +15,9 @@ pub enum SourceError {
     Parse(String),
     #[error("authentication failed: {0}")]
     Auth(String),
+    /// The login POST was refused; retrying would only risk locking the account.
+    #[error("credentials rejected: {0}")]
+    CredentialsRejected(String),
     #[error("page is not a timetable")]
     NotTimetable,
 }

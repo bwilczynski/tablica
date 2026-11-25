@@ -132,6 +132,18 @@ fn json_goto(body: &str) -> Option<String> {
     v.get("goTo")?.as_str().map(str::to_owned)
 }
 
+/// Whether a JSON login reply reports an error in its body (`"status":"error"` or
+/// a non-empty `errors` list), as Librus does for a wrong login or password.
+fn json_login_error(body: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    v.get("status").and_then(|s| s.as_str()) == Some("error")
+        || v.get("errors")
+            .and_then(|e| e.as_array())
+            .is_some_and(|e| !e.is_empty())
+}
+
 struct Page {
     status: u16,
     location: Option<String>,
@@ -310,29 +322,39 @@ impl LibrusClient {
             .header(ORIGIN, origin)
             .form(&[("action", "login"), ("login", login), ("pass", password)]);
         let page = self.send(STEP3, "POST", &login_url, req, trace).await?;
-        if page.status >= 400 {
+        // Conservative: any 4xx on the credentials POST counts as a rejection,
+        // so the scheduler never retries it within a slot.
+        if (400..500).contains(&page.status) {
+            return Err(SourceError::CredentialsRejected(format!(
+                "{STEP3}: status {} at {}",
+                page.status,
+                describe(&login_url)
+            )));
+        }
+        if page.status >= 500 {
             return Err(auth(
                 STEP3,
-                format!(
-                    "status {} at {} (credentials rejected?)",
-                    page.status,
-                    describe(&login_url)
-                ),
+                format!("status {} at {}", page.status, describe(&login_url)),
             ));
         }
-        let next = page
-            .location
-            .clone()
-            .or_else(|| json_goto(&page.body))
-            .ok_or_else(|| {
-                auth(
-                    STEP3,
-                    format!(
-                        "no continuation (Location or goTo) from {}",
-                        describe(&login_url)
-                    ),
-                )
-            })?;
+        let next = page.location.clone().or_else(|| json_goto(&page.body));
+        // A 200 with an error in the body is a rejection too. The body's own text
+        // is never logged: a fixed message is enough to act on.
+        if next.is_none() && json_login_error(&page.body) {
+            return Err(SourceError::CredentialsRejected(format!(
+                "{STEP3}: login reported an error at {}",
+                describe(&login_url)
+            )));
+        }
+        let next = next.ok_or_else(|| {
+            auth(
+                STEP3,
+                format!(
+                    "no continuation (Location or goTo) from {}",
+                    describe(&login_url)
+                ),
+            )
+        })?;
         let next = resolve(STEP3, &login_url, &next)?;
 
         // 4–6. Follow the continuation by hand, checking every hop.
@@ -684,9 +706,72 @@ pub(crate) mod tests {
             .mount(&h.api)
             .await;
         let err = client(&h).login(LOGIN, PASSWORD, None).await.unwrap_err();
-        assert!(matches!(err, SourceError::Auth(_)), "{err}");
+        assert!(matches!(err, SourceError::CredentialsRejected(_)), "{err}");
         assert!(!err.to_string().contains(PASSWORD), "{err}");
         assert!(err.to_string().contains("403"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn login_server_error_is_not_a_rejection() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        Mock::given(method("POST"))
+            .and(path("/OAuth/Authorization"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&h.api)
+            .await;
+        let err = client(&h).login(LOGIN, PASSWORD, None).await.unwrap_err();
+        assert!(matches!(err, SourceError::Auth(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn login_json_error_is_a_rejection() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        Mock::given(method("POST"))
+            .and(path("/OAuth/Authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "error",
+                "errors": [{"code": "invalid", "message": "Nieprawidłowy login i/lub hasło."}]
+            })))
+            .expect(1)
+            .mount(&h.api)
+            .await;
+        let err = client(&h).login(LOGIN, PASSWORD, None).await.unwrap_err();
+        assert!(matches!(err, SourceError::CredentialsRejected(_)), "{err}");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("Nieprawid") && !msg.contains(PASSWORD),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_json_without_goto_or_error_is_not_a_rejection() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        Mock::given(method("POST"))
+            .and(path("/OAuth/Authorization"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})),
+            )
+            .mount(&h.api)
+            .await;
+        let err = client(&h).login(LOGIN, PASSWORD, None).await.unwrap_err();
+        assert!(matches!(err, SourceError::Auth(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn login_401_is_a_rejection() {
+        let h = Hosts::start().await;
+        h.mount_entry().await;
+        Mock::given(method("POST"))
+            .and(path("/OAuth/Authorization"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&h.api)
+            .await;
+        let err = client(&h).login(LOGIN, PASSWORD, None).await.unwrap_err();
+        assert!(matches!(err, SourceError::CredentialsRejected(_)), "{err}");
     }
 
     #[tokio::test]

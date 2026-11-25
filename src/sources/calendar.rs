@@ -80,6 +80,22 @@ pub async fn fetch(
     Ok(FetchOutcome::Fresh(IcsSnapshot { text, etag }))
 }
 
+/// Checks that `ics` is one whole VCALENDAR (it may hold no events), so a captive
+/// page, an error body, a bare component or a truncated feed served with 200
+/// never replaces the last good feed.
+pub fn validate(ics: &str) -> Result<(), SourceError> {
+    let unfolded = parser::unfold(ics);
+    let mut lines = unfolded.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let last = lines.next_back().unwrap_or_default();
+    if !first.eq_ignore_ascii_case("BEGIN:VCALENDAR") || !last.eq_ignore_ascii_case("END:VCALENDAR")
+    {
+        return Err(SourceError::Parse("not a VCALENDAR".into()));
+    }
+    parser::read_calendar(&unfolded).map_err(SourceError::Parse)?;
+    Ok(())
+}
+
 /// A parsed DTSTART/DTEND/RECURRENCE-ID/EXDATE value.
 #[derive(Debug, Clone, Copy)]
 enum Moment {
@@ -97,6 +113,8 @@ struct RawEvent {
     rrule: Option<String>,
     exdates: Vec<Moment>,
     recurrence_id: Option<Moment>,
+    /// `STATUS:CANCELLED`: never shown, but an override still hides its occurrence.
+    cancelled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,6 +156,9 @@ pub fn events_in(
 
     let mut out = Vec::new();
     for raw in &raws {
+        if raw.cancelled {
+            continue;
+        }
         if raw.recurrence_id.is_some() || raw.rrule.is_none() {
             push_if_overlaps(&mut out, raw, raw.start, tz, &win);
             continue;
@@ -405,9 +426,8 @@ fn parse_duration(v: &str) -> Option<Duration> {
 }
 
 fn raw_event(c: &Component<'_>, local: Tz) -> Option<RawEvent> {
-    if prop(c, "STATUS").is_some_and(|p| p.val.as_str().eq_ignore_ascii_case("CANCELLED")) {
-        return None;
-    }
+    let cancelled =
+        prop(c, "STATUS").is_some_and(|p| p.val.as_str().eq_ignore_ascii_case("CANCELLED"));
     let start = parse_prop_moment(prop(c, "DTSTART")?, local)?
         .into_iter()
         .next()?;
@@ -454,6 +474,7 @@ fn raw_event(c: &Component<'_>, local: Tz) -> Option<RawEvent> {
         span,
         rrule: prop(c, "RRULE").map(|p| p.val.as_str().to_owned()),
         exdates,
+        cancelled,
         recurrence_id: prop(c, "RECURRENCE-ID")
             .and_then(|p| parse_prop_moment(p, local))
             .and_then(|m| m.into_iter().next()),
@@ -550,6 +571,59 @@ mod tests {
                 ("Swim class".to_string(), d(2026, 12, 7), 17),
             ]
         );
+    }
+
+    #[test]
+    fn cancelled_override_suppresses_the_occurrence() {
+        let evs = events_in(
+            &fixture("override_cancelled"),
+            WARSAW,
+            d(2026, 11, 25),
+            d(2026, 12, 8),
+        )
+        .unwrap();
+        let days: Vec<_> = evs.iter().map(|e| timed(e).0.date_naive()).collect();
+        assert_eq!(days, vec![d(2026, 12, 7)]);
+    }
+
+    #[test]
+    fn weekly_event_keeps_local_hour_across_dst_end() {
+        // Clocks go back on 2026-10-25.
+        let evs = events_in(
+            &fixture("dst_weekly"),
+            WARSAW,
+            d(2026, 10, 19),
+            d(2026, 11, 2),
+        )
+        .unwrap();
+        let got: Vec<_> = evs
+            .iter()
+            .map(|e| {
+                let s = timed(e).0;
+                (s.date_naive(), s.hour(), s.minute())
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (d(2026, 10, 19), 16, 0),
+                (d(2026, 10, 26), 16, 0),
+                (d(2026, 11, 2), 16, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_whole_vcalendar_is_a_calendar() {
+        assert!(validate("<html><body>Login</body></html>").is_err());
+        assert!(validate("").is_err());
+        let todo = "BEGIN:VTODO\r\nUID:1\r\nSUMMARY:x\r\nEND:VTODO\r\n";
+        assert!(validate(todo).is_err(), "a bare VTODO is not a calendar");
+        let truncated = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1\r\n";
+        assert!(validate(truncated).is_err(), "a truncated feed is rejected");
+        let empty = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nEND:VCALENDAR\r\n";
+        assert!(validate(empty).is_ok(), "an empty calendar is fine");
+        assert!(validate(&fixture("weekly")).is_ok());
     }
 
     #[test]
