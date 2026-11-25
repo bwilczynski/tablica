@@ -1,0 +1,17 @@
+GET https://api.librus.pl/OAuth/Authorization/PerformLogin?client_id=46
+status: 302
+
+date: Wed, 25 Nov 2026 21:56:27 GMT
+x-frame-options: allow-from https://portal.librus.pl
+content-security-policy: frame-ancestors 'self' https://portal.librus.pl
+permissions-policy: publickey-credentials-get=(self "https://portal.librus.pl")
+expires: Thu, 19 Nov 1981 08:52:00 GMT
+pragma: no-cache
+cache-control: no-store
+set-cookie: DZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=None
+set-cookie: DeviceCookie=<redacted>; expires=Thu, 25 Nov 2027 21:56:27 GMT; Max-Age=31536000; path=/OAuth; secure; HttpOnly; SameSite=Lax
+location: /OAuth/Authorization/Grant?client_id=46
+x-apache: dziennik10
+content-length: 0
+content-type: application/json
+

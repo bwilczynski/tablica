@@ -1,0 +1,18 @@
+GET https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata&state=<redacted><redacted>
+status: 302
+
+date: Wed, 25 Nov 2026 21:56:27 GMT
+x-frame-options: allow-from https://portal.librus.pl
+content-security-policy: frame-ancestors 'self' https://portal.librus.pl
+permissions-policy: publickey-credentials-get=(self "https://portal.librus.pl")
+expires: Thu, 19 Nov 1981 08:52:00 GMT
+cache-control: no-store, no-cache, must-revalidate
+pragma: no-cache
+set-cookie: SDZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=Lax
+set-cookie: SDZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=Lax
+set-cookie: DZIENNIKSID=<redacted>; path=/; secure; HttpOnly; SameSite=None
+location: /OAuth/Authorization?client_id=46
+x-apache: dziennik10
+content-length: 0
+content-type: text/html; charset=UTF-8
+
