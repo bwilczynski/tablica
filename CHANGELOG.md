@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/bwilczynski/tablica/compare/v0.1.2...v0.1.3) - 2026-11-26
+
+### Added
+
+- *(family)* feature today's events above the week list in the calendar
+
+### Fixed
+
+- *(family)* keep tomorrow in range and fit events before the empty week
+
 ## [0.1.2](https://github.com/bwilczynski/tablica/compare/v0.1.1...v0.1.2) - 2026-11-26
 
 ### Fixed
