@@ -55,7 +55,7 @@ all kids log in at the same instant. We want:
 
 ```
 src/polling/mod.rs      PollPolicy trait, Outcome, run_poller loop
-src/polling/jitter.rs   jitter helpers (fastrand-based, seedable)
+src/polling/jitter.rs   jitter helpers (rand-based, seedable)
 src/polling/backoff.rs  backoff_delay (moved from scheduler.rs)
 src/family/mod.rs       FamilyCaches (moved from cache.rs `Caches`)
 src/family/polling.rs   TimetablePolicy, IntervalPolicy use, spawn_family_pollers
@@ -89,7 +89,7 @@ where F: FnMut() -> Fut, Fut: Future<Output = Outcome>;
 
 `run_poller` replaces both `every` and `librus_loop`: sleep `initial_delay`,
 run the job, ask the policy for the next time, sleep, repeat; exits on
-shutdown. Policies own their RNG (`fastrand::Rng`, seeded in tests) and
+shutdown. Policies own their RNG (`rand::rngs::StdRng`, seeded in tests) and
 their retry state.
 
 Generic policy shipped in `polling`: **`IntervalPolicy { period, jitter }`**:
@@ -155,7 +155,8 @@ created in `spawn_family_pollers`. Calendar/weather start after a random
 
 ### Dependency
 
-Add `fastrand` (already in the lockfile transitively; tiny, seedable).
+Add `rand` (standard, seedable via `StdRng::seed_from_u64`). New runtime
+dependency; `fastrand` was considered (smaller) but `rand` is the familiar choice.
 
 ## Builder's calls
 
