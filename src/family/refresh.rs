@@ -14,7 +14,7 @@ use crate::sources::weather::{self, Weather};
 
 /// An error message that is safe to log: reqwest errors embed the request URL,
 /// which for the calendar is a secret.
-pub fn describe(err: &SourceError) -> String {
+fn describe(err: &SourceError) -> String {
     match err {
         SourceError::Http(e) => {
             let msg = e.to_string();
@@ -27,7 +27,7 @@ pub fn describe(err: &SourceError) -> String {
     }
 }
 
-pub fn fail<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
+fn fail<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
     source: &str,
     cache: &SourceCache<T>,
     err: SourceError,
@@ -42,7 +42,7 @@ pub fn fail<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
     }
 }
 
-pub fn stored<T>(source: &str, result: std::io::Result<T>) {
+fn stored<T>(source: &str, result: std::io::Result<T>) {
     if let Err(e) = result {
         warn!("{source}: cannot persist cache: {e}");
     }

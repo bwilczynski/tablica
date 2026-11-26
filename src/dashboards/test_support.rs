@@ -1,10 +1,13 @@
 //! Shared fixtures for view-model and render tests.
 
+use std::path::Path;
+
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::{Europe::Warsaw, Tz};
 
 use super::family::{self, FamilyInputs, FamilyView};
 use crate::cache::Stamped;
+use crate::family::FamilyCaches;
 use crate::family::config::{FamilyConfig, KidConfig, WeatherConfig};
 use crate::sources::calendar::IcsSnapshot;
 use crate::sources::librus::timetable::{Lesson, Timetable};
@@ -27,6 +30,22 @@ impl Sample {
             calendar: self.calendar.as_ref(),
             weather: self.weather.as_ref(),
             timetables: self.timetables.iter().map(Option::as_ref).collect(),
+        }
+    }
+
+    /// Writes the sample's data as the family cache files under `data_dir`.
+    pub fn seed(&self, data_dir: &Path) {
+        let caches = FamilyCaches::open(data_dir, self.timetables.len());
+        if let Some(c) = &self.calendar {
+            caches.calendar.put(c.data.clone(), c.fetched_at).unwrap();
+        }
+        if let Some(w) = &self.weather {
+            caches.weather.put(w.data.clone(), w.fetched_at).unwrap();
+        }
+        for (cache, tt) in caches.timetables.iter().zip(&self.timetables) {
+            if let Some(tt) = tt {
+                cache.put(tt.data.clone(), tt.fetched_at).unwrap();
+            }
         }
     }
 }
