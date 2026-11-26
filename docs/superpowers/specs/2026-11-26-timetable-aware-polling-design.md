@@ -21,7 +21,8 @@ all kids log in at the same instant. We want:
 - A generic `polling` module (policy trait + runner) with **no imports of
   family types**.
 - Family-specific policies and wiring live in family-owned code.
-- Daily Librus logins per kid on a school day stay around today's 9 (never above 11).
+- Daily Librus logins per kid on a school day stay around today's 9, about 11 at most.
+  Not a hard cap: unlucky jitter or retries after failures can add one or two.
 
 ## Non-goals
 
@@ -124,18 +125,26 @@ at L(D). A day off with a school day tomorrow (e.g. Sunday) gets the dense
 evening.
 A plain day off gets roughly 3–5 runs total.
 
-`next_run(now)`: take the window containing `now`, candidate =
-now + base × uniform(0.75, 1.25). If the candidate falls past the window's
-end, the next run is the start of the next window that has runs, plus a
-random 0–15 min offset (so window boundaries never fire at exact times).
-Night is skipped this way. Each window start always gets a run, so a
-school day is ~3 (rush) + 2 (school) + 1–2 (afternoon) + 3 (evening) ≈ 9–10.
-(Intervals retuned during planning: the first draft's 40/150/120/50 min gave
-~12–13 runs, breaking the ≤ 9 goal; the goal is now "about 9, never above 11".)
+`next_run(now)`: draw an interval factor k = uniform(0.75, 1.25) and spend
+it at the rate of the windows it passes through: inside a window, k × base;
+whatever is left at a window's end carries into the adjoining window at that
+window's base. Only across a gap (the night) does the run snap to the next
+window's start plus a random 0–15 min offset. Runs are never closer than
+15 min. Expected runs per day are the sum of window length / base: Mon–Thu
+8–10, Fri 6–8 (sparse evening), Sat 3–4, Sun 4–6 (dense evening).
+(Changed during implementation: the first rule, "a candidate past the window
+end jumps to the next window's start", put a run at every window boundary,
+which produced bursts like 07:42 then 08:07 and up to 12 runs a day.)
 
 Retries: on `Failed`, `backoff_delay(retries)` with ±25 % jitter, at most 2
 per scheduled run and never past the next planned run (same rules as
 today's `librus_next_wait`). `Rejected` (bad credentials) never retries.
+
+With a timetable cached, no Librus run starts at night: first runs, retries
+and kid-gap pushes all stay inside windows. A retry pushed into the night or
+past the regular run is dropped in favour of the regular run. The runner asks
+the policy once more right before a run (`PollPolicy::recheck`); a run due at
+night, e.g. after the timer woke late, is postponed to the next window.
 
 ### Staggering
 
