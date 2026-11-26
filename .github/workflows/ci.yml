@@ -1,9 +1,8 @@
 name: CI
 
+# Called by pr-validation.yml on pull requests and by release-plz.yml on pushes to main.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
