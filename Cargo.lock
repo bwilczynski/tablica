@@ -3231,6 +3231,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "minijinja",
+ "png",
  "serde_json",
  "tablica-core",
  "tablica-family",

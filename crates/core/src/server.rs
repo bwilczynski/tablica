@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::Loaded;
-use crate::dashboard::{Active, PrepareContext};
-use crate::device_api::{self, AppState, ImageStore};
+use crate::dashboard::{Active, Dashboard, PrepareContext};
+use crate::device_api::{self, AppState, Clock, ImageStore};
 use crate::render::{Renderer, TemplateSource};
 
 pub struct ServeOptions {
@@ -18,30 +18,58 @@ pub struct ServeOptions {
     pub stop_timeout: Duration,
 }
 
-/// Prepares every dashboard, builds the renderer, binds `listen`, and only then
-/// starts the pollers, so a failure before serving never reaches the network.
-/// Serves until `shutdown` resolves, then cancels the pollers and waits for them
-/// up to `stop_timeout`.
-pub async fn run(
+/// Prepares every dashboard and builds the renderer and the app state. Touches
+/// neither the network nor any listener. Returns the state and the prepared
+/// dashboards, in entry order, so the caller decides when to start their pollers.
+pub fn prepare_state(
     loaded: Loaded,
-    opts: ServeOptions,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<()> {
+    templates: TemplateSource,
+    clock: Clock,
+) -> anyhow::Result<(AppState, Vec<Arc<dyn Dashboard>>)> {
     let cfg = Arc::new(loaded.config);
     let ctx = PrepareContext {
         timezone: cfg.timezone,
         data_dir: &cfg.data_dir,
     };
-    let mut dashboards = Active::new();
+    let mut active = Active::new();
+    let mut ordered = Vec::new();
     for parsed in loaded.dashboards {
         let dashboard = parsed
             .parsed
             .prepare(&ctx)
             .with_context(|| format!("preparing the {} dashboard", parsed.name))?;
-        dashboards.insert(parsed.name, dashboard);
+        ordered.push(dashboard.clone());
+        active.insert(parsed.name, dashboard);
     }
-    let renderer =
-        Arc::new(Renderer::new(opts.templates, &dashboards).context("building the renderer")?);
+    let renderer = Arc::new(Renderer::new(templates, &active).context("building the renderer")?);
+    let state = AppState {
+        cfg,
+        dashboards: Arc::new(active),
+        renderer,
+        images: Arc::new(ImageStore::new()),
+        clock,
+    };
+    Ok((state, ordered))
+}
+
+/// Prepares the dashboards (see [`prepare_state`]), calls `shutdown` to install
+/// the signal handlers, binds `listen`, and only then starts the pollers, so a
+/// failure before serving never reaches the network. Serves until the future
+/// `shutdown` returned resolves, then cancels the pollers and waits for them up
+/// to `stop_timeout`.
+pub async fn run<F>(
+    loaded: Loaded,
+    opts: ServeOptions,
+    shutdown: impl FnOnce() -> anyhow::Result<F>,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let (state, dashboards) = prepare_state(loaded, opts.templates, Arc::new(chrono::Utc::now))?;
+    let cfg = state.cfg.clone();
+    // Only after preparing: until here a signal keeps its default exit behaviour,
+    // even while a cache read blocks.
+    let shutdown = shutdown()?;
 
     // Bind first: a bind failure under a restart loop must never start pollers.
     let listener = tokio::net::TcpListener::bind(cfg.listen)
@@ -49,17 +77,11 @@ pub async fn run(
         .with_context(|| format!("binding {}", cfg.listen))?;
     let stop = CancellationToken::new();
     let pollers: Vec<_> = dashboards
-        .values()
-        .flat_map(|d| d.clone().spawn_pollers(stop.clone()))
+        .into_iter()
+        .flat_map(|d| d.spawn_pollers(stop.clone()))
         .collect();
 
-    let app = device_api::router(AppState {
-        cfg: cfg.clone(),
-        dashboards: Arc::new(dashboards),
-        renderer,
-        images: Arc::new(ImageStore::new()),
-        clock: Arc::new(chrono::Utc::now),
-    });
+    let app = device_api::router(state);
     let names: Vec<&str> = cfg.devices.iter().map(|d| d.name.as_str()).collect();
     info!(devices = %names.join(", "), "listening on {}", cfg.listen);
 
@@ -206,7 +228,7 @@ mod tests {
         let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let spawned = Arc::new(AtomicUsize::new(0));
         let (loaded, _dir) = loaded(taken.local_addr().unwrap(), counting(&spawned));
-        let err = run(loaded, opts(Duration::from_secs(1)), async {})
+        let err = run(loaded, opts(Duration::from_secs(1)), || Ok(async {}))
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("binding"), "{err:#}");
@@ -222,11 +244,21 @@ mod tests {
             ..counting(&spawned)
         };
         let (loaded, _dir) = loaded(addr, stub);
-        let err = run(loaded, opts(Duration::from_secs(1)), async {})
+        let installed = Arc::new(AtomicUsize::new(0));
+        let install = {
+            let installed = installed.clone();
+            move || {
+                installed.fetch_add(1, Ordering::SeqCst);
+                Ok(async {})
+            }
+        };
+        let err = run(loaded, opts(Duration::from_secs(1)), install)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("prepare failure"), "{err:#}");
         assert_eq!(spawned.load(Ordering::SeqCst), 0);
+        // Signal handlers are installed only once preparing succeeded.
+        assert_eq!(installed.load(Ordering::SeqCst), 0);
         // The port was never bound, so it is still free.
         tokio::net::TcpListener::bind(addr).await.unwrap();
     }
@@ -250,7 +282,7 @@ mod tests {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_millis(1500),
-            run(loaded, opts(Duration::from_secs(1)), shutdown),
+            run(loaded, opts(Duration::from_secs(1)), move || Ok(shutdown)),
         )
         .await;
         result
