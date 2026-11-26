@@ -3,31 +3,21 @@
 pub mod timetable_policy;
 pub mod windows;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use rand::rngs::StdRng;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
-use crate::config::Config;
-use crate::family::FamilyCaches;
-use crate::family::config::FamilyConfig;
-use crate::polling::{IntervalPolicy, Outcome, run_poller};
-use crate::scheduler::{
-    Sources, refresh_calendar_once, refresh_timetable_once, refresh_weather_once,
-};
+use crate::polling::Outcome;
 use crate::sources::SourceError;
 
 pub use timetable_policy::{PlannedRuns, TimetablePolicy};
 
-const CALENDAR_EVERY: Duration = Duration::from_secs(15 * 60);
-const WEATHER_EVERY: Duration = Duration::from_secs(30 * 60);
-const INTERVAL_SPREAD: f64 = 0.2;
+pub(crate) const CALENDAR_EVERY: Duration = Duration::from_secs(15 * 60);
+pub(crate) const WEATHER_EVERY: Duration = Duration::from_secs(30 * 60);
+pub(crate) const INTERVAL_SPREAD: f64 = 0.2;
 
 /// How a fetch went, as far as scheduling cares.
-fn to_outcome(r: &Result<(), SourceError>) -> Outcome {
+pub(crate) fn to_outcome(r: &Result<(), SourceError>) -> Outcome {
     match r {
         Ok(()) => Outcome::Ok,
         Err(SourceError::CredentialsRejected(_)) => Outcome::Rejected,
@@ -35,96 +25,8 @@ fn to_outcome(r: &Result<(), SourceError>) -> Outcome {
     }
 }
 
-fn fresh_rng() -> StdRng {
+pub(crate) fn fresh_rng() -> StdRng {
     rand::make_rng()
-}
-
-/// Starts the family dashboard's pollers: calendar, weather and one Librus
-/// poller per kid. They run until `shutdown` is cancelled.
-pub fn spawn_family_pollers(
-    cfg: Arc<Config>,
-    family: Arc<FamilyConfig>,
-    caches: Arc<FamilyCaches>,
-    sources: Sources,
-    shutdown: CancellationToken,
-) -> Vec<JoinHandle<()>> {
-    let tz = cfg.timezone;
-    let mut handles = Vec::new();
-
-    {
-        let (family, caches, http) = (family.clone(), caches.clone(), sources.http.clone());
-        let policy = IntervalPolicy::new(CALENDAR_EVERY, INTERVAL_SPREAD, fresh_rng());
-        handles.push(tokio::spawn(run_poller(
-            "calendar".into(),
-            tz,
-            policy,
-            shutdown.clone(),
-            move || {
-                let (family, caches, http) = (family.clone(), caches.clone(), http.clone());
-                async move {
-                    let r =
-                        refresh_calendar_once(&http, &family.ics_url, &caches.calendar, Utc::now())
-                            .await;
-                    to_outcome(&r)
-                }
-            },
-        )));
-    }
-
-    {
-        let (family, caches, src) = (family.clone(), caches.clone(), sources.clone());
-        let policy = IntervalPolicy::new(WEATHER_EVERY, INTERVAL_SPREAD, fresh_rng());
-        handles.push(tokio::spawn(run_poller(
-            "weather".into(),
-            tz,
-            policy,
-            shutdown.clone(),
-            move || {
-                let (family, caches, src) = (family.clone(), caches.clone(), src.clone());
-                async move {
-                    let r = refresh_weather_once(
-                        &src.http,
-                        &src.weather_base,
-                        &family.weather,
-                        tz,
-                        &caches.weather,
-                        Utc::now(),
-                    )
-                    .await;
-                    to_outcome(&r)
-                }
-            },
-        )));
-    }
-
-    let planned = PlannedRuns::new(family.kids.len());
-    // Kids with nothing cached fetch at startup; reserve those times before any
-    // poller starts so kids with cached data keep their gap from them.
-    let empty: Vec<bool> = caches
-        .timetables
-        .iter()
-        .map(|c| c.get().is_none())
-        .collect();
-    planned.reserve_startup(Utc::now().with_timezone(&tz), &empty, &mut fresh_rng());
-    for (index, kid) in family.kids.iter().enumerate() {
-        let policy = TimetablePolicy::new(index, caches.clone(), planned.clone(), fresh_rng());
-        let (kid, caches, urls) = (kid.clone(), caches.clone(), sources.librus.clone());
-        handles.push(tokio::spawn(run_poller(
-            format!("timetable ({})", kid.label),
-            tz,
-            policy,
-            shutdown.clone(),
-            move || {
-                let (kid, caches, urls) = (kid.clone(), caches.clone(), urls.clone());
-                async move {
-                    let cache = &caches.timetables[index];
-                    let r = refresh_timetable_once(&urls, &kid, cache, Utc::now()).await;
-                    to_outcome(&r)
-                }
-            },
-        )));
-    }
-    handles
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 pub mod config;
 pub mod dashboard;
 pub mod polling;
+pub mod refresh;
 
 use std::path::Path;
 

@@ -12,13 +12,12 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use crate::cache::{SourceCache, is_stale};
+use crate::cache::{SourceCache, source_health};
 use crate::config::{BitDepth, Config, Device};
 use crate::dashboards::family::{self, FamilyInputs};
 use crate::dashboards::homelab;
@@ -299,19 +298,6 @@ async fn preview(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-}
-
-fn source_health<T: serde::Serialize + DeserializeOwned + Clone>(
-    cache: &SourceCache<T>,
-    now: DateTime<Utc>,
-    max_age: Duration,
-) -> Value {
-    let fetched_at = cache.get().map(|s| s.fetched_at);
-    json!({
-        "fetched_at": fetched_at.map(|t| t.to_rfc3339()),
-        "stale": fetched_at.is_none_or(|t| is_stale(t, now, max_age)),
-        "last_error": cache.last_error().map(|(_, msg)| msg),
-    })
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<Value> {

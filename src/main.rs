@@ -6,20 +6,15 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use tablica::config::{Config, Loaded};
-use tablica::dashboard::DashboardEntry;
+use tablica::dashboard::{Dashboard, DashboardEntry, PrepareContext};
 use tablica::device_api::{self, AppState, ImageStore};
-use tablica::family::FamilyCaches;
-use tablica::family::config::FamilyConfig;
 use tablica::family::dashboard::ParsedFamily;
 use tablica::render::{Renderer, TemplateSource};
-use tablica::scheduler::{self, Sources};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long shutdown waits for the fetch loops to stop.
 const FETCHER_STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -121,45 +116,31 @@ async fn serve(
     templates: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
-    let ParsedFamily {
-        cfg: family,
-        endpoints,
-    } = family;
-    let family: Arc<FamilyConfig> = Arc::new(family);
-    let caches = Arc::new(FamilyCaches::open(&cfg.data_dir, family.kids.len()));
+    let family = Arc::new(
+        family
+            .into_dashboard(&PrepareContext {
+                timezone: cfg.timezone,
+                data_dir: &cfg.data_dir,
+            })
+            .context("preparing the family dashboard")?,
+    );
     let source = match templates {
         Some(dir) => TemplateSource::Dir(dir),
         None => TemplateSource::Embedded,
     };
     let renderer = Arc::new(Renderer::new(source).context("building the renderer")?);
 
-    let http = reqwest::Client::builder()
-        .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .context("building the http client")?;
-    let sources = Sources {
-        http,
-        weather_base: endpoints.weather_base,
-        librus: endpoints.librus,
-    };
     // Bind first: a bind failure under a restart loop must never trigger Librus logins.
     let listener = tokio::net::TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("binding {}", cfg.listen))?;
     let stop = CancellationToken::new();
-    let fetchers = scheduler::spawn_all(
-        cfg.clone(),
-        family.clone(),
-        caches.clone(),
-        sources,
-        stop.clone(),
-    );
+    let fetchers = family.clone().spawn_pollers(stop.clone());
 
     let app = device_api::router(AppState {
         cfg: cfg.clone(),
-        family,
-        caches,
+        family: Arc::new(family.cfg.clone()),
+        caches: family.caches.clone(),
         renderer,
         images: Arc::new(ImageStore::new()),
         clock: Arc::new(chrono::Utc::now),

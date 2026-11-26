@@ -1,34 +1,20 @@
-//! Source refreshes and the entry point that starts every dashboard's pollers.
-
-use std::sync::Arc;
+//! One-shot refreshes of the family dashboard's sources.
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::cache::SourceCache;
-use crate::config::Config;
-use crate::family::FamilyCaches;
-use crate::family::config::{FamilyConfig, KidConfig};
+use crate::family::config::KidConfig;
 use crate::sources::SourceError;
 use crate::sources::calendar::{self, FetchOutcome, IcsSnapshot};
 use crate::sources::librus::timetable::{self, Timetable};
 use crate::sources::librus::{LibrusClient, LibrusUrls};
 use crate::sources::weather::{self, Weather};
 
-/// External endpoints; tests point them at mock servers.
-#[derive(Clone)]
-pub struct Sources {
-    pub http: reqwest::Client,
-    pub weather_base: String,
-    pub librus: LibrusUrls,
-}
-
 /// An error message that is safe to log: reqwest errors embed the request URL,
 /// which for the calendar is a secret.
-fn describe(err: &SourceError) -> String {
+pub fn describe(err: &SourceError) -> String {
     match err {
         SourceError::Http(e) => {
             let msg = e.to_string();
@@ -41,7 +27,7 @@ fn describe(err: &SourceError) -> String {
     }
 }
 
-fn fail<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
+pub fn fail<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
     source: &str,
     cache: &SourceCache<T>,
     err: SourceError,
@@ -56,7 +42,7 @@ fn fail<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
     }
 }
 
-fn stored<T>(source: &str, result: std::io::Result<T>) {
+pub fn stored<T>(source: &str, result: std::io::Result<T>) {
     if let Err(e) = result {
         warn!("{source}: cannot persist cache: {e}");
     }
@@ -133,19 +119,6 @@ pub async fn refresh_timetable_once(
         }
         Err(e) => Err(fail("timetable", cache, e, now)),
     }
-}
-
-/// Starts every fetch loop until `shutdown` is cancelled. Each dashboard
-/// brings its own pollers.
-// Interim: `family` is passed alongside `cfg` until Task 5 routes through dashboards.
-pub fn spawn_all(
-    cfg: Arc<Config>,
-    family: Arc<FamilyConfig>,
-    caches: Arc<FamilyCaches>,
-    sources: Sources,
-    shutdown: CancellationToken,
-) -> Vec<JoinHandle<()>> {
-    crate::family::polling::spawn_family_pollers(cfg, family, caches, sources, shutdown)
 }
 
 #[cfg(test)]
