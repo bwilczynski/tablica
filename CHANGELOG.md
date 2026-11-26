@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/bwilczynski/tablica/compare/v0.1.0...v0.1.1) - 2026-11-26
+
+### Added
+
+- poll Librus on timetable-aware jittered schedule
+- *(family)* add timetable-aware Librus poll policy with kid staggering
+- *(family)* derive Librus polling windows from the timetable
+- *(polling)* add generic poll policy, runner and jitter
+- show event location and shade day bands in the calendar
+
 ## [0.1.0](https://github.com/bwilczynski/tablica/releases/tag/v0.1.0) - 2026-11-26
 
 ### Added
