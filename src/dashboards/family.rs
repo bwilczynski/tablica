@@ -234,7 +234,10 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
     };
     let last_day = today + Duration::days(i64::from(inputs.cfg.calendar_days.max(1)) - 1);
     let tz = inputs.now.timezone();
-    let events = match calendar::events_in(&stamped.data.text, tz, today, last_day) {
+    // Always expand through tomorrow: it may become the featured day even when
+    // the configured window ends today.
+    let tomorrow = today.succ_opt().unwrap_or(today);
+    let events = match calendar::events_in(&stamped.data.text, tz, today, last_day.max(tomorrow)) {
         Ok(events) => events,
         Err(e) => {
             tracing::warn!("cannot expand calendar: {e}");
@@ -245,15 +248,13 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
     col.note = stale_note(stamped, CALENDAR_MAX_AGE, inputs.now);
 
     // Past `switch_at`, tomorrow takes over once nothing is left today.
-    let featured = match today.succ_opt() {
-        Some(tomorrow)
-            if after_switch && !events.iter().any(|ev| ends_later_today(ev, inputs.now)) =>
-        {
-            col.heading = pl::TOMORROW_HEADING;
-            tomorrow
-        }
-        _ => today,
+    let featured = if after_switch && !events.iter().any(|ev| ends_later_today(ev, inputs.now)) {
+        col.heading = pl::TOMORROW_HEADING;
+        tomorrow
+    } else {
+        today
     };
+    let last_day = last_day.max(featured);
 
     let mut entries: Vec<Entry> = vec![];
     for ev in &events {
@@ -275,9 +276,6 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
             EVENT_PX + u32::from(e.location.is_some()) * LOCATION_PX,
         ));
     }
-    if week_entries.is_empty() {
-        rows.push((Row::WeekEmpty, SECTION_PX + EVENT_PX));
-    }
     for (i, e) in week_entries.iter().enumerate() {
         let new_day = i == 0 || week_entries[i - 1].key.0 != e.key.0;
         let heading = if i == 0 { SECTION_PX } else { 0 };
@@ -288,7 +286,16 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
     }
 
     let room = CALENDAR_PX - if col.note.is_some() { NOTE_PX } else { 0 };
-    let shown = if rows.iter().map(|r| r.1).sum::<u32>() <= room {
+    let total: u32 = rows.iter().map(|r| r.1).sum();
+    // An empty week only says so when there is room left after the events.
+    if week_entries.is_empty() && total + SECTION_PX + EVENT_PX <= room {
+        col.week = Some(WeekSection {
+            heading: pl::WEEK_HEADING,
+            days: vec![],
+            empty: Some(pl::NO_EVENTS),
+        });
+    }
+    let shown = if total <= room {
         rows.len()
     } else {
         let budget = room - MORE_PX;
@@ -303,7 +310,7 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
 
     let hidden = rows[shown..]
         .iter()
-        .filter(|r| matches!(r.0, Row::Featured(_) | Row::Week(_)))
+        .filter(|r| !matches!(r.0, Row::FeaturedEmpty))
         .count();
     for (row, _) in rows.into_iter().take(shown) {
         match row {
@@ -313,13 +320,6 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
                 title: e.title.clone(),
                 location: e.location.clone(),
             }),
-            Row::WeekEmpty => {
-                col.week = Some(WeekSection {
-                    heading: pl::WEEK_HEADING,
-                    days: vec![],
-                    empty: Some(pl::NO_EVENTS),
-                });
-            }
             Row::Week(e) => {
                 let week = col.week.get_or_insert_with(|| WeekSection {
                     heading: pl::WEEK_HEADING,
@@ -353,7 +353,6 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
 enum Row<'a> {
     FeaturedEmpty,
     Featured(&'a Entry),
-    WeekEmpty,
     Week(&'a Entry),
 }
 
@@ -923,6 +922,36 @@ mod tests {
     }
 
     #[test]
+    fn one_day_window_still_features_tomorrow_after_the_switch() {
+        let events = [
+            vevent(1, "Pianino", "20261126T171500", "20261126T181500", false),
+            vevent(
+                2,
+                "Nocny pociąg",
+                "20261125T220000",
+                "20261126T020000",
+                false,
+            ),
+            vevent(3, "Kino", "20261127T190000", "20261127T210000", false),
+        ];
+        let c = cal_view(warsaw(2026, 11, 25, 20, 0), &events, 1);
+        assert_eq!(c.heading, "JUTRO");
+        assert_eq!(
+            c.featured,
+            vec![
+                line("do 2:00", "Nocny pociąg", None),
+                line("17:15–18:15", "Pianino", None),
+            ]
+        );
+        assert_eq!(c.week.unwrap().empty, Some("Brak wydarzeń"));
+        // Before the switch the window is just today.
+        let c = cal_view(warsaw(2026, 11, 25, 7, 0), &events, 1);
+        assert_eq!(c.heading, "DZISIAJ");
+        assert_eq!(c.featured, vec![line("od 22:00", "Nocny pociąg", None)]);
+        assert_eq!(c.week.unwrap().empty, Some("Brak wydarzeń"));
+    }
+
+    #[test]
     fn switch_waits_for_switch_at_even_when_today_is_done() {
         let c = cal_view(warsaw(2026, 11, 25, 17, 0), &[], 7);
         assert_eq!(c.heading, "DZISIAJ");
@@ -1025,10 +1054,15 @@ mod tests {
         let c = cal_view(now, &hourly_events(25, 8, Some("Hala")), 7);
         assert_eq!((shown(&c), c.more), (8, None));
         assert!(c.week.is_none());
-        // 9 (351px) overflow the 345px budget: 8 fit.
+        // 9 (351px) still fit; the empty week has no room and must not push
+        // an event into "+N więcej".
         let c = cal_view(now, &hourly_events(25, 9, Some("Hala")), 7);
+        assert_eq!((shown(&c), c.more), (9, None));
+        assert!(c.week.is_none());
+        // 10 (390px) overflow the 345px budget: 8 fit.
+        let c = cal_view(now, &hourly_events(25, 10, Some("Hala")), 7);
         assert_eq!(shown(&c), 8);
-        assert_eq!(c.more.as_deref(), Some("+1 więcej"));
+        assert_eq!(c.more.as_deref(), Some("+2 więcej"));
         // A week event that no longer fits is counted as hidden.
         let mut events = hourly_events(25, 8, Some("Hala"));
         events.push(vevent(
