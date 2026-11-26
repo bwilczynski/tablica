@@ -3,7 +3,7 @@
 use chrono::NaiveTime;
 use serde::Deserialize;
 
-use crate::config::{ConfigError, REDACTED, Secrets};
+use tablica_core::config::{ConfigError, REDACTED, Secrets};
 
 const SECTION: &str = "family";
 
@@ -145,9 +145,9 @@ pub fn parse_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Secrets;
     use std::fs;
     use std::path::Path;
+    use tablica_core::config::Secrets;
 
     const SAMPLE: &str = include_str!("../../../../config.sample.toml");
 

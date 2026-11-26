@@ -1011,8 +1011,8 @@ mod tests {
 mod load_tests {
     use std::fs;
 
-    use crate::config::{ConfigError, Loaded, load};
     use crate::family::dashboard::family_kids;
+    use tablica_core::config::{ConfigError, Loaded, load};
 
     const FAMILY: &str = r#"
 timezone = "Europe/Warsaw"

@@ -6,13 +6,13 @@ use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
 
-use crate::cache::{Stamped, is_stale};
 use crate::family::config::FamilyConfig;
 use crate::family::{CALENDAR_MAX_AGE, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
 use crate::sources::calendar::{self, CalendarEvent, EventWhen, IcsSnapshot};
 use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::Weather;
 use crate::text::{Condition, pl};
+use tablica_core::cache::{Stamped, is_stale};
 
 // Calendar heights in px, mirroring `templates/family.html`. Rows that don't
 // fit collapse into a "+N więcej" line.

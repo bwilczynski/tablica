@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use tracing::{info, warn};
 
-use crate::cache::SourceCache;
 use crate::family::config::KidConfig;
 use crate::sources::SourceError;
 use crate::sources::calendar::{self, FetchOutcome, IcsSnapshot};
 use crate::sources::librus::timetable::{self, Timetable};
 use crate::sources::librus::{LibrusClient, LibrusUrls};
 use crate::sources::weather::{self, Weather};
+use tablica_core::cache::SourceCache;
 
 /// An error message that is safe to log: reqwest errors embed the request URL,
 /// which for the calendar is a secret.
@@ -161,7 +161,8 @@ mod tests {
             format!("{err:?}"),
             format!("{:#}", anyhow::anyhow!(err)),
             cache.last_error().expect("error recorded").1,
-            crate::cache::source_health(cache, at(9), chrono::Duration::hours(1)).to_string(),
+            tablica_core::cache::source_health(cache, at(9), chrono::Duration::hours(1))
+                .to_string(),
             logs.text(),
         ];
         for text in rendered {

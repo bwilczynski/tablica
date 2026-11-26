@@ -10,16 +10,16 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
-use crate::config::{BitDepth, Config, Device, Schedule};
-use crate::dashboard::{Active, Dashboard, ParsedDashboard, PrepareContext, View};
 use crate::dashboards::family::FamilyView;
 use crate::dashboards::homelab::{self, HomelabDashboard};
 use crate::dashboards::test_support::{
     sample_inputs, sample_view_evening, sample_view_morning, time, warsaw, worst_case_view,
 };
-use crate::device_api::{AppState, ImageStore, router};
 use crate::family::dashboard::{Endpoints, ParsedFamily};
-use crate::render::{MAX_PNG_BYTES, Renderer, TemplateSource};
+use tablica_core::config::{BitDepth, Config, Device, Schedule};
+use tablica_core::dashboard::{Active, Dashboard, ParsedDashboard, PrepareContext, View};
+use tablica_core::device_api::{AppState, ImageStore, router};
+use tablica_core::render::{MAX_PNG_BYTES, Renderer, TemplateSource};
 
 fn templates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("templates")

@@ -1,11 +1,6 @@
-pub mod cache;
-pub mod config;
-pub mod dashboard;
+#[cfg(test)]
+mod config_tests;
 pub mod dashboards;
-pub mod device_api;
 pub mod family;
-pub mod polling;
-pub mod render;
-pub mod server;
 pub mod sources;
 pub mod text;

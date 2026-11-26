@@ -2,18 +2,18 @@
 
 use serde::Serialize;
 
-use crate::config::Secrets;
 use std::sync::Arc;
+use tablica_core::config::Secrets;
 
 use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::dashboard::{
+use crate::text::pl;
+use tablica_core::dashboard::{
     Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
 };
-use crate::text::pl;
 
 /// Homelab takes no config; any `[homelab]` keys are ignored.
 pub struct ParsedHomelab;

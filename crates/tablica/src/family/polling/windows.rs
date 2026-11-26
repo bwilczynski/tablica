@@ -6,8 +6,8 @@ use chrono::{DateTime, Datelike, Days, NaiveDate, NaiveTime, TimeZone, Weekday};
 use chrono_tz::Tz;
 use rand::rngs::StdRng;
 
-use crate::polling::{between, jittered};
 use crate::sources::librus::timetable::Timetable;
+use tablica_core::polling::{between, jittered};
 
 const fn hm(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).expect("valid time")
