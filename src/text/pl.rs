@@ -6,7 +6,10 @@ use chrono_tz::Tz;
 
 use super::{Condition, PrecipKind};
 
-pub const CALENDAR_HEADING: &str = "TEN TYDZIEŃ";
+pub const TODAY_HEADING: &str = "DZISIAJ";
+pub const TOMORROW_HEADING: &str = "JUTRO";
+pub const WEEK_HEADING: &str = "TEN TYDZIEŃ";
+pub const NO_EVENTS: &str = "Brak wydarzeń";
 pub const ALL_DAY: &str = "cały dzień";
 pub const NO_LESSONS: &str = "Brak lekcji";
 pub const CALENDAR_UNAVAILABLE: &str = "Kalendarz niedostępny";
@@ -83,6 +86,16 @@ fn relative(d: NaiveDate, today: NaiveDate) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Open-ended start of an event that runs past today: "od 22:00".
+pub fn from(t: NaiveTime) -> String {
+    format!("od {}", hm(t))
+}
+
+/// Open-ended end of an event that began before today: "do 10:00".
+pub fn until(t: NaiveTime) -> String {
+    format!("do {}", hm(t))
 }
 
 /// Hour without a leading zero: "8:00".
@@ -273,6 +286,8 @@ mod tests {
             "śnieg 40% od 9:00"
         );
         assert_eq!(more(3), "+3 więcej");
+        assert_eq!(from(NaiveTime::from_hms_opt(22, 0, 0).unwrap()), "od 22:00");
+        assert_eq!(until(NaiveTime::from_hms_opt(9, 5, 0).unwrap()), "do 9:05");
         let today = d(2026, 11, 25);
         let mon = Warsaw.with_ymd_and_hms(2026, 11, 23, 7, 30, 0).unwrap();
         assert_eq!(stale(mon, today), "stan na pon. 7:30");
@@ -282,7 +297,10 @@ mod tests {
 
     #[test]
     fn consts() {
-        assert_eq!(CALENDAR_HEADING, "TEN TYDZIEŃ");
+        assert_eq!(TODAY_HEADING, "DZISIAJ");
+        assert_eq!(TOMORROW_HEADING, "JUTRO");
+        assert_eq!(WEEK_HEADING, "TEN TYDZIEŃ");
+        assert_eq!(NO_EVENTS, "Brak wydarzeń");
         assert_eq!(ALL_DAY, "cały dzień");
         assert_eq!(NO_LESSONS, "Brak lekcji");
         assert_eq!(CALENDAR_UNAVAILABLE, "Kalendarz niedostępny");

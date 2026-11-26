@@ -29,7 +29,8 @@ The homelab dashboard only gets a placeholder slot here.
 
 - The device firmware gets everything it needs from this server: setup, display, log.
 - The family dashboard shows:
-  - the coming week of the family's iCloud calendar
+  - the family's iCloud calendar: today (or tomorrow, in the evening) in detail, then
+    the rest of the coming week
   - each of the two kids' school timetables from Librus
   - current weather and the forecast
 - It switches between "today" and "next school day" at a set time each afternoon.
@@ -54,7 +55,9 @@ The homelab dashboard only gets a placeholder slot here.
   | Date header | "Środa, 25 listopada" (weekday capitalised, month in the genitive) |
   | Today / tomorrow | "Dziś", "Jutro" |
   | Weekday short | "pon.", "wt.", "śr.", "czw.", "pt.", "sob.", "niedz." |
-  | Calendar heading | "TEN TYDZIEŃ" |
+  | Calendar headings | "DZISIAJ" / "JUTRO", then "TEN TYDZIEŃ" |
+  | No events | "Brak wydarzeń" |
+  | Event crossing midnight | "od 22:00", "do 2:00" |
   | All-day event | "cały dzień" |
   | Overflow | "+3 więcej" |
   | High / low | "maks. 6° min. 1°" |
@@ -258,16 +261,16 @@ longitude = 21.01
 │░Środa, 25 listopada░░░░░░░░░░░░░░░░░░░░░░░░☁ 4°░░Pochmurno░░░░░░░░░░░░░░░░│
 │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░maks. 6° min. 1° · deszcz od 15│
 ├────────────────────────┬────────────────────────┬────────────────────────┤
-│ TEN TYDZIEŃ            │ KID 1                  │ KID 2                  │
-│ Dziś                   │░Dziś · 8:00–14:25░░░░░░│░Dziś · 8:00–12:35░░░░░░│
-│ 16:30 Swimming (Kid 1) │ 8:00  Matematyka       │ 8:00  Ed. wczesnoszk.  │
-│ 18:00 Parent–teacher…  │ 8:55  Język polski     │ 8:55  Ed. wczesnoszk.  │
-│ czw. 26                │ 9:50  H̶i̶s̶t̶o̶r̶i̶a̶          │ 9:50  Język angielski  │
-│ cały dzień Babcia…     │ 10:55 WF               │ 10:55 Religia          │
-│ 17:15 Piano (Kid 2)    │ 11:50 Biologia █zast.█ │ 11:50 WF               │
-│ pt. 27 …               │ 12:45 Język angielski  │                        │
-│ …                      │ czw. · 8:55–13:30      │ czw. · 8:00–11:40      │
-│                        │ Fizyka, Chemia, …      │ Ed. wczesnoszk. ×2, …  │
+│ DZISIAJ                │ KID 1                  │ KID 2                  │
+│ Swimming (… 16:30–17:30│░Dziś · 8:00–14:25░░░░░░│░Dziś · 8:00–12:35░░░░░░│
+│ Pływalnia Polna        │ 8:00  Matematyka       │ 8:00  Ed. wczesnoszk.  │
+│ Parent–tea… 18:00–19:30│ 8:55  Język polski     │ 8:55  Ed. wczesnoszk.  │
+│ SP 12, sala 21         │ 9:50  H̶i̶s̶t̶o̶r̶i̶a̶          │ 9:50  Język angielski  │
+│ TEN TYDZIEŃ            │ 10:55 WF               │ 10:55 Religia          │
+│░Jutro░░░░░░░░░░░░░░░░░░│ 11:50 Biologia █zast.█ │ 11:50 WF               │
+│ Babcia…     cały dzień │ 12:45 Język angielski  │                        │
+│ Piano (Kid… 17:15–18:15│ czw. · 8:55–13:30      │ czw. · 8:00–11:40      │
+│░pt. 27░░░░░░░░░░░░░░░░░│ Fizyka, Chemia, …      │ Ed. wczesnoszk. ×2, …  │
 └────────────────────────┴────────────────────────┴────────────────────────┘
 ```
 
@@ -275,7 +278,8 @@ longitude = 21.01
 
 **Mockup:** [`2026-11-25-family-dashboard-mockup.html`](2026-11-25-family-dashboard-mockup.html)
 was the agreed visual reference for the original design. The calendar column has
-since changed (shaded day bands, bold titles, a location line); the rules below and
+since changed (a detailed DZISIAJ/JUTRO section above a compact week list, shaded
+day bands, bold titles, a location line); the rules below and
 the previews in `target/preview/` are current. It's self-contained and opens straight from disk:
 - the 2-bit and 1-bit reference renders from the Takumi test, embedded as images
 - live HTML/CSS mockups of the states before and after `switch_at`, using the same CSS
@@ -286,34 +290,41 @@ Inter loads from Google Fonts when online, and a fallback font is used otherwise
 **Tone rule (2-bit palette: 0, 85, 170, 255):**
 - **Light gray (170)** is for structural areas: the header band, each kid's day bar and
   the calendar's day bands, with black bold text on top.
-- **Black** is for text, rules and alerts. The inverted "zast."/flag tag and today's
-  calendar band are black with white text, so they stand out. Cancelled lessons stay
-  struck through.
+- **Black** is for text, rules and alerts. The inverted "zast."/flag tag is black with
+  white text, so it stands out. Cancelled lessons stay struck through.
 - **Dark gray (85)** is for secondary text: the calendar's event locations.
 - At 1-bit, light gray turns into white (cutoff 160), so the layout degrades cleanly:
-  light-gray bands disappear and the bold text keeps the hierarchy. Black bands (today,
-  flags) stay, and dark gray turns black.
+  light-gray bands disappear and the bold text keeps the hierarchy. Black flags stay,
+  and dark gray turns black.
 
 - **Header:**
   - the date
   - a weather icon, the current temperature and conditions
   - a second line: today's high and low, plus a short precipitation note
-- **Calendar column ("TEN TYDZIEŃ"):**
-  - covers today plus the following `calendar_days − 1` days, grouped by day
-  - today's events drop off once they've ended
-  - all-day events are shown as "cały dzień". That's wider than a time, so it must not
-    push its title out of line with the other titles: either widen the time column or
-    give all-day events their own style without a time (builder's call, check in the
-    preview)
-  - each day is a light-gray band, and today's band is black with white text
-  - each event shows its time and a bold title; if it has a `LOCATION`, the first line
-    of it appears below the title in smaller dark-gray text
-  - long titles and locations are cut with an ellipsis
-  - roughly 4–5 entries a week are expected. The column fits about 14 single-line
-    events, fewer with locations; the builder estimates row heights in px from the
-    template's CSS
-  - if events don't fit, the overflow becomes a final "+N więcej" line, and the rows
-    kept leave room for it and for the stale note
+- **Calendar column**, two sections sharing one height budget:
+  - **Featured day ("DZISIAJ", or "JUTRO" after the switch):** each event as a bold
+    title on the left and its time range ("16:30–17:30") on the right. If it has a
+    `LOCATION`, the first line of it appears below in smaller dark-gray text, using the
+    full column width. "Brak wydarzeń" when nothing is left that day.
+  - **"TEN TYDZIEŃ":** the other days of the window (today plus the following
+    `calendar_days − 1` days), each a light-gray day band, then one line per event with
+    the same title-and-time layout but no location. After the switch, whatever is left
+    of today is listed here under "Dziś". "Brak wydarzeń" when the rest of the window
+    is empty.
+  - **The switch:** the featured day becomes tomorrow once it is past `switch_at`
+    **and** no timed event that ends today is still to come, so the evening's last
+    event keeps "DZISIAJ" on screen until it ends. All-day events and events running
+    past midnight don't hold the switch back.
+  - events drop off once they've ended
+  - all-day events show "cały dzień". Events crossing midnight show an open-ended time
+    on the day they're listed under: "od 22:00", "do 2:00", or "cały dzień" when they
+    cover the whole day; they are placed on the featured day when they reach it,
+    otherwise on their start day
+  - long titles and locations are cut with an ellipsis; the time is always shown in full
+  - the builder estimates row heights in px from the template's CSS. The featured
+    section takes room first; if events don't fit, the overflow becomes a final
+    "+N więcej" line, and the rows kept leave room for it and for the stale note. The
+    "TEN TYDZIEŃ" heading is only shown together with at least one row under it
 - **One column per kid:**
   - **Featured day:** a light-gray header bar reading "Dziś · 8:00–14:25" (or "Jutro · …" / "pon. · …"), then each
     lesson with its start time and subject.
@@ -331,6 +342,9 @@ Inter loads from Google Fonts when online, and a fallback font is used otherwise
 |---|---|---|---|
 | Before `switch_at` | today, or the next school day if today has no lessons | next school day after the featured one | rest of today |
 | After `switch_at` | next school day | today's start and end times, or nothing if today had no lessons | adds tomorrow's high, low and conditions |
+
+The calendar column follows the same switch, but holds it back until today's last
+timed event has ended (see the calendar column above).
 
 - A **school day** is a date that has at least one lesson, cancelled or not, in that
   kid's Librus timetable. Weekends, holidays and breaks have no lessons, so they're
@@ -534,7 +548,8 @@ the same NAS:
 ## Testing
 
 - **Unit tests for the view-model rules**, with a fixed clock. They cover:
-  - before and after the switch
+  - before and after the switch, including the calendar holding it back while an
+    event is left today
   - Friday evening jumping to Monday
   - a holiday week
   - an empty day

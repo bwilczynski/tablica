@@ -15,11 +15,12 @@
   .day { font-weight: 700; font-size: 14px; margin-top: 7px; margin-bottom: 2px; }
   /* Row heights are mirrored by the *_PX constants in src/dashboards/family.rs. */
   .cday { background: #aaa; font-weight: 700; font-size: 14px; height: 22px; line-height: 22px; margin-top: 6px; padding: 0 6px; }
-  .cday.today { background: #000; color: #fff; }
-  .ev { display: flex; gap: 8px; margin-top: 4px; padding-left: 6px; line-height: 19px; }
-  .t { width: 78px; white-space: nowrap; flex-shrink: 0; }
-  .evb { min-width: 0; }
-  .ttl { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .h4.sec { margin-top: 12px; }
+  .none { margin-top: 4px; padding-left: 6px; line-height: 19px; }
+  .ev { margin-top: 4px; padding: 0 6px; line-height: 19px; }
+  .evr { display: flex; gap: 8px; }
+  .ttl { flex: 1; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t { white-space: nowrap; flex-shrink: 0; }
   .loc { color: #555; font-size: 13px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .more { font-weight: 700; font-size: 14px; line-height: 19px; margin-top: 6px; padding-left: 6px; }
   .focus { background: #aaa; color: #000; padding: 3px 6px; margin: 4px 0; font-weight: 700; }
@@ -45,12 +46,20 @@
   <div class="body">
     <div class="col" style="width: 280px;">
       <div class="h4">{{ calendar.heading }}</div>
-      {% for day in calendar.days %}
-      <div class="cday{% if day.today %} today{% endif %}">{{ day.label }}</div>
+      {% for ev in calendar.featured %}
+      <div class="ev"><div class="evr"><div class="ttl">{{ ev.title }}</div><div class="t">{{ ev.time }}</div></div>{% if ev.location %}<div class="loc">{{ ev.location }}</div>{% endif %}</div>
+      {% endfor %}
+      {% if calendar.featured_empty %}<div class="none">{{ calendar.featured_empty }}</div>{% endif %}
+      {% if calendar.week %}
+      <div class="h4 sec">{{ calendar.week.heading }}</div>
+      {% for day in calendar.week.days %}
+      <div class="cday">{{ day.label }}</div>
       {% for ev in day.events %}
-      <div class="ev"><div class="t">{{ ev.time }}</div><div class="evb"><div class="ttl">{{ ev.title }}</div>{% if ev.location %}<div class="loc">{{ ev.location }}</div>{% endif %}</div></div>
+      <div class="ev"><div class="evr"><div class="ttl">{{ ev.title }}</div><div class="t">{{ ev.time }}</div></div></div>
       {% endfor %}
       {% endfor %}
+      {% if calendar.week.empty %}<div class="none">{{ calendar.week.empty }}</div>{% endif %}
+      {% endif %}
       {% if calendar.more %}<div class="more">{{ calendar.more }}</div>{% endif %}
       {% if calendar.note %}<div class="small">{{ calendar.note }}</div>{% endif %}
     </div>

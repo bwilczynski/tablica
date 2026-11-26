@@ -16,15 +16,17 @@ use crate::text::{Condition, pl};
 
 // Calendar heights in px, mirroring `templates/family.html`. Rows that don't
 // fit collapse into a "+N więcej" line.
-/// Column height under the heading: 416 − 20 padding − 25.25 `.h4`, rounded down.
+/// Column height under the first heading: 416 − 20 padding − 25.25 `.h4`, rounded down.
 const CALENDAR_PX: u32 = 370;
 /// `.small` stale note: 12px × 1.25.
 const NOTE_PX: u32 = 15;
 /// `.more`: 19px line plus 6px top margin.
 const MORE_PX: u32 = 25;
+/// `.h4.sec`: 25.25px heading plus 12px top margin, rounded up.
+const SECTION_PX: u32 = 38;
 /// `.cday`: 22px band plus 6px top margin.
 const DAY_PX: u32 = 28;
-/// `.ev`: 19px title line plus 4px top margin.
+/// `.ev` and `.none`: 19px line plus 4px top margin.
 const EVENT_PX: u32 = 23;
 /// `.loc`: 16px second line.
 const LOCATION_PX: u32 = 16;
@@ -53,10 +55,25 @@ pub struct Header {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CalendarCol {
+    /// "DZISIAJ", or "JUTRO" from `switch_at` on.
     pub heading: &'static str,
-    pub days: Vec<CalDay>,
+    /// The featured day's events in detail: time range, title and location.
+    pub featured: Vec<EventLine>,
+    /// Shown instead of `featured` when nothing is left that day.
+    pub featured_empty: Option<&'static str>,
+    /// The rest of the window, one line per event. `None` when there is no
+    /// calendar or no room for it.
+    pub week: Option<WeekSection>,
     pub more: Option<String>,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WeekSection {
+    pub heading: &'static str,
+    pub days: Vec<CalDay>,
+    /// Shown instead of `days` when nothing else is planned.
+    pub empty: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -64,7 +81,6 @@ pub struct CalDay {
     #[serde(skip)]
     pub date: NaiveDate,
     pub label: String,
-    pub today: bool,
     pub events: Vec<EventLine>,
 }
 
@@ -203,9 +219,12 @@ fn build_header(inputs: &FamilyInputs, today: NaiveDate) -> Header {
 }
 
 fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
+    let after_switch = inputs.now.time() >= inputs.cfg.switch_at;
     let mut col = CalendarCol {
-        heading: pl::CALENDAR_HEADING,
-        days: vec![],
+        heading: pl::TODAY_HEADING,
+        featured: vec![],
+        featured_empty: None,
+        week: None,
         more: None,
         note: None,
     };
@@ -225,87 +244,206 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
     };
     col.note = stale_note(stamped, CALENDAR_MAX_AGE, inputs.now);
 
-    let mut lines: Vec<(SortKey, EventLine)> = vec![];
-    for ev in &events {
-        collect_lines(ev, inputs.now, today, last_day, &mut lines);
-    }
-    lines.sort_by_key(|l| l.0);
+    // Past `switch_at`, tomorrow takes over once nothing is left today.
+    let featured = match today.succ_opt() {
+        Some(tomorrow)
+            if after_switch && !events.iter().any(|ev| ends_later_today(ev, inputs.now)) =>
+        {
+            col.heading = pl::TOMORROW_HEADING;
+            tomorrow
+        }
+        _ => today,
+    };
 
-    let costs: Vec<u32> = lines
-        .iter()
-        .enumerate()
-        .map(|(i, ((date, _, _), line))| {
-            let new_day = i == 0 || lines[i - 1].0.0 != *date;
-            u32::from(new_day) * DAY_PX
-                + EVENT_PX
-                + u32::from(line.location.is_some()) * LOCATION_PX
-        })
-        .collect();
+    let mut entries: Vec<Entry> = vec![];
+    for ev in &events {
+        collect_entries(ev, inputs.now, today, featured, last_day, &mut entries);
+    }
+    entries.sort_by_key(|e| e.key);
+    let (featured_entries, week_entries): (Vec<&Entry>, Vec<&Entry>) =
+        entries.iter().partition(|e| e.key.0 == featured);
+
+    // Rows top to bottom with their heights. The week heading rides on the
+    // first week row so it is never shown alone.
+    let mut rows: Vec<(Row, u32)> = vec![];
+    if featured_entries.is_empty() {
+        rows.push((Row::FeaturedEmpty, EVENT_PX));
+    }
+    for e in featured_entries {
+        rows.push((
+            Row::Featured(e),
+            EVENT_PX + u32::from(e.location.is_some()) * LOCATION_PX,
+        ));
+    }
+    if week_entries.is_empty() {
+        rows.push((Row::WeekEmpty, SECTION_PX + EVENT_PX));
+    }
+    for (i, e) in week_entries.iter().enumerate() {
+        let new_day = i == 0 || week_entries[i - 1].key.0 != e.key.0;
+        let heading = if i == 0 { SECTION_PX } else { 0 };
+        rows.push((
+            Row::Week(e),
+            heading + u32::from(new_day) * DAY_PX + EVENT_PX,
+        ));
+    }
+
     let room = CALENDAR_PX - if col.note.is_some() { NOTE_PX } else { 0 };
-    let shown = if costs.iter().sum::<u32>() <= room {
-        costs.len()
+    let shown = if rows.iter().map(|r| r.1).sum::<u32>() <= room {
+        rows.len()
     } else {
         let budget = room - MORE_PX;
-        costs
-            .iter()
-            .scan(0, |used, c| {
-                *used += c;
+        rows.iter()
+            .scan(0, |used, r| {
+                *used += r.1;
                 Some(*used)
             })
             .take_while(|used| *used <= budget)
             .count()
     };
 
-    let total = lines.len();
-    let mut days: Vec<CalDay> = vec![];
-    for ((date, _, _), line) in lines.into_iter().take(shown) {
-        let new_day = days.last().is_none_or(|d| d.date != date);
-        if new_day {
-            days.push(CalDay {
-                date,
-                label: pl::day_label(date, today),
-                today: date == today,
-                events: vec![],
-            });
-        }
-        if let Some(day) = days.last_mut() {
-            day.events.push(line);
+    let hidden = rows[shown..]
+        .iter()
+        .filter(|r| matches!(r.0, Row::Featured(_) | Row::Week(_)))
+        .count();
+    for (row, _) in rows.into_iter().take(shown) {
+        match row {
+            Row::FeaturedEmpty => col.featured_empty = Some(pl::NO_EVENTS),
+            Row::Featured(e) => col.featured.push(EventLine {
+                time: event_time(e, featured),
+                title: e.title.clone(),
+                location: e.location.clone(),
+            }),
+            Row::WeekEmpty => {
+                col.week = Some(WeekSection {
+                    heading: pl::WEEK_HEADING,
+                    days: vec![],
+                    empty: Some(pl::NO_EVENTS),
+                });
+            }
+            Row::Week(e) => {
+                let week = col.week.get_or_insert_with(|| WeekSection {
+                    heading: pl::WEEK_HEADING,
+                    days: vec![],
+                    empty: None,
+                });
+                let date = e.key.0;
+                if week.days.last().is_none_or(|d| d.date != date) {
+                    week.days.push(CalDay {
+                        date,
+                        label: pl::day_label(date, today),
+                        events: vec![],
+                    });
+                }
+                if let Some(day) = week.days.last_mut() {
+                    day.events.push(EventLine {
+                        time: event_time(e, date),
+                        title: e.title.clone(),
+                        location: None,
+                    });
+                }
+            }
         }
     }
-    col.days = days;
-    if total > shown {
-        col.more = Some(pl::more(total - shown));
+    if hidden > 0 {
+        col.more = Some(pl::more(hidden));
     }
     col
+}
+
+enum Row<'a> {
+    FeaturedEmpty,
+    Featured(&'a Entry),
+    WeekEmpty,
+    Week(&'a Entry),
 }
 
 /// (date, timed?, start): all-day events lead each day.
 type SortKey = (NaiveDate, bool, DateTime<Tz>);
 
-fn collect_lines(
+/// One calendar event placed on one day of the window.
+struct Entry {
+    key: SortKey,
+    span: Span,
+    title: String,
+    location: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Span {
+    AllDay,
+    Timed {
+        start: DateTime<Tz>,
+        end: DateTime<Tz>,
+    },
+}
+
+/// Time of an event as listed under `day`: "16:30–17:30", or open-ended for
+/// events that cross midnight.
+fn event_time(e: &Entry, day: NaiveDate) -> String {
+    let Span::Timed { start, end } = e.span else {
+        return pl::ALL_DAY.to_string();
+    };
+    if end <= start {
+        return pl::hm(start.time());
+    }
+    match (
+        start.date_naive() < day,
+        last_moment(start, end).date_naive() > day,
+    ) {
+        (true, true) => pl::ALL_DAY.to_string(),
+        (true, false) => pl::until(end.time()),
+        (false, true) => pl::from(start.time()),
+        (false, false) => pl::range(start.time(), end.time()),
+    }
+}
+
+/// A timed event that has not ended yet and ends today. All-day events and
+/// events running past midnight do not hold off the switch to tomorrow: the
+/// former would hold it all evening, the latter are listed under tomorrow.
+fn ends_later_today(ev: &CalendarEvent, now: DateTime<Tz>) -> bool {
+    let EventWhen::Timed { start, end } = &ev.when else {
+        return false;
+    };
+    !ev.title.trim().is_empty()
+        && last_moment(*start, *end) >= now
+        && last_moment(*start, *end).date_naive() == now.date_naive()
+}
+
+/// The last instant an event occupies: an event ending exactly at midnight
+/// does not reach the next day.
+fn last_moment(start: DateTime<Tz>, end: DateTime<Tz>) -> DateTime<Tz> {
+    if end > start {
+        end - Duration::nanoseconds(1)
+    } else {
+        start
+    }
+}
+
+/// Places each event on one day: all-day events on every day they cover, timed
+/// ones on the featured day when they reach it, otherwise on their start day
+/// (today for events already running).
+fn collect_entries(
     ev: &CalendarEvent,
     now: DateTime<Tz>,
     today: NaiveDate,
+    featured: NaiveDate,
     last_day: NaiveDate,
-    out: &mut Vec<(SortKey, EventLine)>,
+    out: &mut Vec<Entry>,
 ) {
     let title = ev.title.trim();
     if title.is_empty() {
         return;
     }
-    let location = ev.location.clone();
     match &ev.when {
         EventWhen::AllDay { first, last } => {
             let mut d = (*first).max(today);
             while d <= (*last).min(last_day) {
-                out.push((
-                    (d, false, now),
-                    EventLine {
-                        time: pl::ALL_DAY.to_string(),
-                        title: title.to_string(),
-                        location: location.clone(),
-                    },
-                ));
+                out.push(Entry {
+                    key: (d, false, now),
+                    span: Span::AllDay,
+                    title: title.to_string(),
+                    location: ev.location.clone(),
+                });
                 let Some(next) = d.succ_opt() else { break };
                 d = next;
             }
@@ -316,18 +454,25 @@ fn collect_lines(
             } else {
                 *start < now
             };
-            let date = start.date_naive().max(today);
+            let reaches_featured = start.date_naive() <= featured
+                && last_moment(*start, *end).date_naive() >= featured;
+            let date = if reaches_featured {
+                featured
+            } else {
+                start.date_naive().max(today)
+            };
             if ended || date > last_day {
                 return;
             }
-            out.push((
-                (date, true, *start),
-                EventLine {
-                    time: pl::hm(start.time()),
-                    title: title.to_string(),
-                    location,
+            out.push(Entry {
+                key: (date, true, *start),
+                span: Span::Timed {
+                    start: *start,
+                    end: *end,
                 },
-            ));
+                title: title.to_string(),
+                location: ev.location.clone(),
+            });
         }
     }
 }
@@ -665,8 +810,26 @@ mod tests {
         build(&inputs).calendar
     }
 
+    fn line(time: &str, title: &str, location: Option<&str>) -> EventLine {
+        EventLine {
+            time: time.into(),
+            title: title.into(),
+            location: location.map(Into::into),
+        }
+    }
+
+    fn week_labels(c: &CalendarCol) -> Vec<&str> {
+        c.week
+            .as_ref()
+            .unwrap()
+            .days
+            .iter()
+            .map(|d| d.label.as_str())
+            .collect()
+    }
+
     #[test]
-    fn calendar_groups_days_and_drops_ended_events() {
+    fn before_switch_features_today_and_lists_the_rest_of_the_week() {
         let events = [
             vevent(1, "Zakończone", "20261125T150000", "20261125T160000", false),
             located(
@@ -674,64 +837,147 @@ mod tests {
                 "Dom\\nul. Długa 1",
             ),
             vevent(3, "Babcia", "20261126", "20261127", true),
-            vevent(4, "Pianino", "20261126T171500", "20261126T181500", false),
+            located(
+                vevent(4, "Pianino", "20261126T171500", "20261126T181500", false),
+                "Szkoła muzyczna",
+            ),
             vevent(5, "Poza oknem", "20261202T100000", "20261202T110000", false),
             vevent(6, "   ", "20261126T100000", "20261126T110000", false),
         ];
         let c = cal_view(warsaw(2026, 11, 25, 17, 0), &events, 7);
-        assert_eq!(c.heading, "TEN TYDZIEŃ");
-        assert_eq!(c.days.len(), 2);
-        assert_eq!(c.days[0].label, "Dziś");
-        assert!(c.days[0].today);
+        assert_eq!(c.heading, "DZISIAJ");
+        assert_eq!(c.featured, vec![line("16:30–17:30", "Trwa", Some("Dom"))]);
+        assert_eq!(c.featured_empty, None);
+        let week = c.week.unwrap();
+        assert_eq!(week.heading, "TEN TYDZIEŃ");
+        assert_eq!(week.empty, None);
+        assert_eq!(week.days.len(), 1);
+        assert_eq!(week.days[0].label, "Jutro");
         assert_eq!(
-            c.days[0].events,
-            vec![EventLine {
-                time: "16:30".into(),
-                title: "Trwa".into(),
-                location: Some("Dom".into()),
-            }]
+            week.days[0].events,
+            vec![
+                line("cały dzień", "Babcia", None),
+                line("17:15–18:15", "Pianino", None),
+            ]
         );
-        assert_eq!(c.days[1].label, "Jutro");
-        assert!(!c.days[1].today);
-        assert_eq!(c.days[1].events[0].location, None);
-        assert_eq!(c.days[1].events[0].time, "cały dzień");
-        assert_eq!(c.days[1].events[0].title, "Babcia");
-        assert_eq!(c.days[1].events[1].time, "17:15");
         assert_eq!(c.more, None);
         assert_eq!(c.note, None);
+    }
+
+    fn evening_events() -> Vec<String> {
+        vec![
+            located(
+                vevent(1, "Wywiadówka", "20261125T180000", "20261125T200000", false),
+                "SP 12",
+            ),
+            vevent(2, "Imieniny", "20261125", "20261126", true),
+            vevent(3, "Babcia", "20261126", "20261127", true),
+            located(
+                vevent(4, "Pianino", "20261126T171500", "20261126T181500", false),
+                "Szkoła muzyczna",
+            ),
+            vevent(
+                5,
+                "Nocny pociąg",
+                "20261125T220000",
+                "20261126T020000",
+                false,
+            ),
+            vevent(6, "Kino", "20261127T190000", "20261127T210000", false),
+        ]
+    }
+
+    #[test]
+    fn after_switch_stays_on_today_while_an_event_is_left() {
+        let c = cal_view(warsaw(2026, 11, 25, 19, 0), &evening_events(), 7);
+        assert_eq!(c.heading, "DZISIAJ");
+        assert_eq!(
+            c.featured,
+            vec![
+                line("cały dzień", "Imieniny", None),
+                line("18:00–20:00", "Wywiadówka", Some("SP 12")),
+                line("od 22:00", "Nocny pociąg", None),
+            ]
+        );
+        assert_eq!(week_labels(&c), vec!["Jutro", "pt. 27"]);
+    }
+
+    #[test]
+    fn after_switch_features_tomorrow_once_today_is_done() {
+        // Wywiadówka ends at 20:00; the all-day event and the overnight train
+        // do not hold off the switch.
+        let c = cal_view(warsaw(2026, 11, 25, 20, 0), &evening_events(), 7);
+        assert_eq!(c.heading, "JUTRO");
+        assert_eq!(
+            c.featured,
+            vec![
+                line("cały dzień", "Babcia", None),
+                line("do 2:00", "Nocny pociąg", None),
+                line("17:15–18:15", "Pianino", Some("Szkoła muzyczna")),
+            ]
+        );
+        assert_eq!(week_labels(&c), vec!["Dziś", "pt. 27"]);
+        let days = &c.week.unwrap().days;
+        assert_eq!(days[0].events, vec![line("cały dzień", "Imieniny", None)]);
+        assert_eq!(days[1].events, vec![line("19:00–21:00", "Kino", None)]);
+    }
+
+    #[test]
+    fn switch_waits_for_switch_at_even_when_today_is_done() {
+        let c = cal_view(warsaw(2026, 11, 25, 17, 0), &[], 7);
+        assert_eq!(c.heading, "DZISIAJ");
+        let c = cal_view(warsaw(2026, 11, 25, 18, 0), &[], 7);
+        assert_eq!(c.heading, "JUTRO");
+    }
+
+    #[test]
+    fn events_crossing_midnight_get_open_ended_times() {
+        let events = [
+            vevent(1, "Obóz", "20261124T100000", "20261126T100000", false),
+            vevent(2, "Noc", "20261124T200000", "20261125T090000", false),
+            vevent(3, "Do północy", "20261125T220000", "20261126T000000", false),
+            vevent(4, "Impreza", "20261125T230000", "20261126T010000", false),
+        ];
+        let c = cal_view(warsaw(2026, 11, 25, 7, 0), &events, 7);
+        assert_eq!(
+            c.featured,
+            vec![
+                line("cały dzień", "Obóz", None),
+                line("do 9:00", "Noc", None),
+                line("22:00–0:00", "Do północy", None),
+                line("od 23:00", "Impreza", None),
+            ]
+        );
+        assert!(c.week.unwrap().days.is_empty());
     }
 
     #[test]
     fn multi_day_all_day_event_is_listed_under_each_day() {
         let events = [vevent(1, "Wycieczka", "20261126", "20261129", true)];
         let c = cal_view(warsaw(2026, 11, 25, 7, 0), &events, 3);
-        let labels: Vec<_> = c.days.iter().map(|d| d.label.as_str()).collect();
-        assert_eq!(labels, vec!["Jutro", "pt. 27"]);
+        assert_eq!(c.featured_empty, Some("Brak wydarzeń"));
+        assert!(c.featured.is_empty());
+        assert_eq!(week_labels(&c), vec!["Jutro", "pt. 27"]);
     }
 
     #[test]
-    fn running_multi_day_timed_event_is_listed_today() {
-        let events = [vevent(
-            1,
-            "Obóz",
-            "20261124T100000",
-            "20261126T100000",
-            false,
-        )];
-        let c = cal_view(warsaw(2026, 11, 25, 7, 0), &events, 7);
-        assert_eq!(c.days.len(), 1);
-        assert_eq!(c.days[0].label, "Dziś");
-        assert_eq!(c.days[0].events[0].title, "Obóz");
+    fn empty_calendar_says_so_in_both_sections() {
+        let c = cal_view(warsaw(2026, 11, 25, 7, 0), &[], 7);
+        assert_eq!(c.featured_empty, Some("Brak wydarzeń"));
+        let week = c.week.unwrap();
+        assert!(week.days.is_empty());
+        assert_eq!(week.empty, Some("Brak wydarzeń"));
+        assert_eq!(c.more, None);
     }
 
-    fn hourly_events(n: usize, location: Option<&str>) -> Vec<String> {
+    fn hourly_events(day: u32, n: usize, location: Option<&str>) -> Vec<String> {
         (0..n)
             .map(|i| {
                 let ev = vevent(
                     i,
                     &format!("Wydarzenie {i}"),
-                    &format!("20261126T{:02}0000", 8 + i),
-                    &format!("20261126T{:02}3000", 8 + i),
+                    &format!("202611{day}T{:02}0000", 8 + i),
+                    &format!("202611{day}T{:02}3000", 8 + i),
                     false,
                 );
                 match location {
@@ -743,40 +989,58 @@ mod tests {
     }
 
     fn shown(c: &CalendarCol) -> usize {
-        c.days.iter().map(|d| d.events.len()).sum()
+        c.featured.len()
+            + c.week
+                .as_ref()
+                .map_or(0, |w| w.days.iter().map(|d| d.events.len()).sum())
     }
 
     #[test]
-    fn calendar_overflow_collapses_to_more_line() {
+    fn week_overflow_collapses_to_more_line() {
         let now = warsaw(2026, 11, 25, 7, 0);
-        // Day band (28px) + 14 rows of 23px = 350px: fits the 370px column
-        // outright, and still fits beside a 15px stale note.
-        let c = cal_view(now, &hourly_events(14, None), 7);
-        assert_eq!((shown(&c), c.more), (14, None));
-        let stale = cal_view_fetched(now, &hourly_events(14, None), 7, Duration::hours(3));
+        // "Brak wydarzeń" today (23px), week heading (38px) and day band (28px),
+        // then 23px rows: 12 rows take 365px and fit the 370px column.
+        let c = cal_view(now, &hourly_events(26, 12, Some("Hala")), 7);
+        assert_eq!((shown(&c), c.more), (12, None));
+        // The 15px stale note leaves 355px; reserving 25px for "+N więcej" leaves
+        // a 330px budget, which fits 10.
+        let stale = cal_view_fetched(now, &hourly_events(26, 12, None), 7, Duration::hours(3));
         assert!(stale.note.is_some());
-        assert_eq!((shown(&stale), stale.more), (14, None));
-        // 15 rows (373px) overflow; with 25px reserved for "+N więcej", 13 fit (327px).
-        let c = cal_view(now, &hourly_events(15, None), 7);
-        assert_eq!(shown(&c), 13);
+        assert_eq!(shown(&stale), 10);
+        assert_eq!(stale.more.as_deref(), Some("+2 więcej"));
+        // 13 rows (388px) overflow: 11 fit the 345px budget.
+        let c = cal_view(now, &hourly_events(26, 13, None), 7);
+        assert_eq!(shown(&c), 11);
         assert_eq!(c.more.as_deref(), Some("+2 więcej"));
     }
 
     #[test]
-    fn locations_and_stale_note_take_room_from_the_budget() {
+    fn featured_rows_with_locations_take_room_first() {
         let now = warsaw(2026, 11, 25, 7, 0);
-        // Located rows are 39px. 8 fit outright (340px), even with the note.
-        let c = cal_view(now, &hourly_events(8, Some("Hala")), 7);
+        // Located rows are 39px. 7 (273px) plus the empty week (61px) fit.
+        let c = cal_view(now, &hourly_events(25, 7, Some("Hala")), 7);
+        assert_eq!((shown(&c), c.more), (7, None));
+        assert!(c.week.is_some());
+        // 8 (312px) leave no room for the empty week, which is dropped silently.
+        let c = cal_view(now, &hourly_events(25, 8, Some("Hala")), 7);
         assert_eq!((shown(&c), c.more), (8, None));
-        let c = cal_view_fetched(now, &hourly_events(8, Some("Hala")), 7, Duration::hours(3));
-        assert_eq!((shown(&c), c.more), (8, None));
-        // 9 (379px) overflow: 345px budget fits 8, but the note leaves 330px for 7.
-        let c = cal_view(now, &hourly_events(9, Some("Hala")), 7);
+        assert!(c.week.is_none());
+        // 9 (351px) overflow the 345px budget: 8 fit.
+        let c = cal_view(now, &hourly_events(25, 9, Some("Hala")), 7);
         assert_eq!(shown(&c), 8);
         assert_eq!(c.more.as_deref(), Some("+1 więcej"));
-        let c = cal_view_fetched(now, &hourly_events(9, Some("Hala")), 7, Duration::hours(3));
-        assert_eq!(shown(&c), 7);
-        assert_eq!(c.more.as_deref(), Some("+2 więcej"));
+        // A week event that no longer fits is counted as hidden.
+        let mut events = hourly_events(25, 8, Some("Hala"));
+        events.push(vevent(
+            99,
+            "Jutro",
+            "20261126T100000",
+            "20261126T110000",
+            false,
+        ));
+        let c = cal_view(now, &events, 7);
+        assert_eq!(shown(&c), 8);
+        assert_eq!(c.more.as_deref(), Some("+1 więcej"));
     }
 
     #[test]
@@ -868,7 +1132,9 @@ mod tests {
         assert_eq!(v.header.note.as_deref(), Some("stan na 8:00"));
         assert!(v.header.temp.is_some());
         assert_eq!(v.calendar.note.as_deref(), Some("Kalendarz niedostępny"));
-        assert!(v.calendar.days.is_empty());
+        assert!(v.calendar.featured.is_empty());
+        assert_eq!(v.calendar.featured_empty, None);
+        assert!(v.calendar.week.is_none());
 
         s.weather = None;
         let v = build(&s.inputs(now));
@@ -886,7 +1152,7 @@ mod tests {
         s.calendar.as_mut().unwrap().fetched_at = now.with_timezone(&Utc) - Duration::hours(3);
         let v = build(&s.inputs(now));
         assert_eq!(v.calendar.note.as_deref(), Some("stan na 9:00"));
-        assert!(!v.calendar.days.is_empty());
+        assert!(!v.calendar.featured.is_empty());
     }
 
     #[test]
