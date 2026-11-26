@@ -345,7 +345,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    const SAMPLE: &str = include_str!("../config.sample.toml");
+    const SAMPLE: &str = include_str!("../../../config.sample.toml");
 
     fn write_secrets(dir: &Path) {
         for (name, value) in [

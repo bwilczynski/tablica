@@ -12,5 +12,15 @@
     { "type": "ci", "hidden": true }, { "type": "build", "hidden": true },
     { "type": "style", "hidden": true }
   ],
-  "packages": { ".": { "release-type": "rust", "package-name": "tablica", "changelog-path": "CHANGELOG.md" } }
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "tablica",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
+        { "type": "toml", "path": "Cargo.lock", "jsonpath": "$.package[?(!@.source)].version" }
+      ]
+    }
+  }
 }

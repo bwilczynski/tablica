@@ -2,7 +2,7 @@
 FROM rust:1.100-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked
+RUN cargo build --release --locked -p tablica
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/bwilczynski/tablica"

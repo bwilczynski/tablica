@@ -5,7 +5,7 @@ rust = { version = "1.100.0", profile = "minimal", components = ["clippy", "rust
 run = "cargo build"
 
 [tasks.test]
-run = "cargo test"
+run = "cargo test --workspace"
 
 [tasks.lint]
-run = "cargo clippy --all-targets -- -D warnings && cargo fmt --check"
+run = "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check"

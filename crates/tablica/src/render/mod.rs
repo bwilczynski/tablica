@@ -23,7 +23,7 @@ pub const MAX_PNG_BYTES: usize = 90_000;
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 480;
-const INTER: &[u8] = include_bytes!("../../assets/fonts/Inter.ttf");
+const INTER: &[u8] = include_bytes!("../../../../assets/fonts/Inter.ttf");
 
 /// Where templates come from.
 #[derive(Debug, Clone)]

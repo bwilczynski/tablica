@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src/**"
+      - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "build.rs"
@@ -64,6 +65,8 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:8080/healthz | tee /dev/stderr | grep -q '"status":"ok"'
+          curl -fsS -o /dev/null http://127.0.0.1:8080/preview/family.png
+          curl -fsS -o /dev/null http://127.0.0.1:8080/preview/homelab.png
       - name: Container log
         if: failure()
         run: docker logs tablica-smoke

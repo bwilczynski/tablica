@@ -1,0 +1,44 @@
+[package]
+name = "tablica"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "TRMNL e-ink backend serving family and homelab dashboards"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+icalendar.workspace = true
+image.workspace = true
+minijinja.workspace = true
+minijinja-autoreload.workspace = true
+minijinja-embed.workspace = true
+png.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rrule.workspace = true
+scraper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+takumi.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+tower.workspace = true
+wiremock.workspace = true
+
+[build-dependencies]
+minijinja-embed.workspace = true
