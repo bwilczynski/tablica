@@ -1,0 +1,1 @@
+{"data":{"current_temp_c":4.4,"current":"Cloudy","today":{"date":"2026-11-25","max_c":6.0,"min_c":1.0,"condition":"Rain"},"tomorrow":{"date":"2026-11-26","max_c":3.0,"min_c":-1.0,"condition":"Snow"},"hourly":[{"at":"2026-11-25T14:00:00","probability":20,"kind":"Rain"},{"at":"2026-11-25T15:00:00","probability":30,"kind":"Rain"}]},"fetched_at":"2026-11-25T05:55:00Z"}

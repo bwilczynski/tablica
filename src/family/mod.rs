@@ -77,4 +77,35 @@ mod tests {
         assert_eq!(TIMETABLE_MAX_AGE, Duration::hours(26));
         assert_eq!(WEATHER_MAX_AGE, Duration::hours(3));
     }
+
+    fn copy_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cache");
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn pre_split_cache_files_load_unchanged() {
+        use crate::dashboards::test_support::{sample_inputs, warsaw};
+        let dir = copy_fixture();
+        let caches = FamilyCaches::open(dir.path(), 1);
+        let expected = sample_inputs(warsaw(2026, 11, 25, 7, 0));
+        let fetched_at = Utc.with_ymd_and_hms(2026, 11, 25, 5, 55, 0).unwrap();
+
+        let calendar = caches.calendar.get().unwrap();
+        assert_eq!(calendar.fetched_at, fetched_at);
+        assert_eq!(calendar.data, expected.calendar.unwrap().data);
+
+        let weather = caches.weather.get().unwrap();
+        assert_eq!(weather.fetched_at, fetched_at);
+        assert_eq!(weather.data, expected.weather.unwrap().data);
+
+        let timetable = caches.timetables[0].get().unwrap();
+        assert_eq!(timetable.fetched_at, fetched_at);
+        assert_eq!(timetable.data, expected.timetables[0].clone().unwrap().data);
+    }
 }

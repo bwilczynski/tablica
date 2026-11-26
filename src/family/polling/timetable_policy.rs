@@ -586,4 +586,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn cached_fixture_takes_warm_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cache");
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+        }
+        let caches = Arc::new(FamilyCaches::open(dir.path(), 1));
+        let fetched_at = caches.timetables[0].get().unwrap().fetched_at;
+        let now = (fetched_at + chrono::Duration::hours(1)).with_timezone(&WARSAW);
+        let mut p = policy(0, &caches, &PlannedRuns::new(1), 1);
+        let first = p.first_run(now);
+        assert!(
+            first > now + chrono::Duration::minutes(1),
+            "{first} vs {now}"
+        );
+    }
 }
