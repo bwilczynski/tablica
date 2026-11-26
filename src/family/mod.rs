@@ -1,5 +1,7 @@
 //! The family dashboard's data: its caches and how its sources are polled.
 
+pub mod polling;
+
 use std::path::Path;
 
 use chrono::Duration;
