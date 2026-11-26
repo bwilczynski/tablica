@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod config;
+pub mod dashboard;
 pub mod dashboards;
 pub mod device_api;
 pub mod family;

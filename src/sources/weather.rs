@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use super::SourceError;
-use crate::config::WeatherConfig;
+use crate::family::config::WeatherConfig;
 use crate::text::{Condition, PrecipKind};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

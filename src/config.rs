@@ -1,11 +1,15 @@
 //! Config loading: one TOML file plus secrets resolved from files or environment.
+//! Core parses the globals and devices; each dashboard parses its own section.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::NaiveTime;
 use chrono_tz::Tz;
 use serde::Deserialize;
+
+use crate::dashboard::{DashboardEntry, ParsedDashboard, validate_names};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -40,6 +44,12 @@ pub enum ConfigError {
     InvalidBitDepth { device: String, value: u8 },
     #[error("device `{device}`: invalid MAC address `{mac}`")]
     InvalidMac { device: String, mac: String },
+    #[error("[{section}]: {message}")]
+    Dashboard { section: String, message: String },
+    #[error("device `{device}`: unknown or inactive dashboard `{dashboard}`")]
+    UnknownDashboard { device: String, dashboard: String },
+    #[error("dashboard name `{name}` {reason}")]
+    InvalidDashboardName { name: String, reason: &'static str },
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +60,6 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub schedule: Schedule,
     pub devices: Vec<Device>,
-    pub family: FamilyConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,15 +75,9 @@ pub struct Device {
     /// Uppercase, colon-separated.
     pub mac: String,
     pub api_key: String,
-    pub dashboard: DashboardKind,
+    /// Name of an active dashboard entry.
+    pub dashboard: String,
     pub bit_depth: BitDepth,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DashboardKind {
-    Family,
-    Homelab,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,25 +86,23 @@ pub enum BitDepth {
     Two,
 }
 
-#[derive(Clone)]
-pub struct FamilyConfig {
-    pub switch_at: NaiveTime,
-    pub calendar_days: u32,
-    pub ics_url: String,
-    pub kids: Vec<KidConfig>,
-    pub weather: WeatherConfig,
+/// A dashboard's parsed (not prepared) config, under its entry's name.
+pub struct ParsedEntry {
+    pub name: &'static str,
+    pub parsed: Box<dyn ParsedDashboard>,
 }
 
-#[derive(Clone)]
-pub struct KidConfig {
-    pub label: String,
-    pub librus_login: String,
-    pub librus_password: String,
+/// Everything [`load`] produces.
+pub struct Loaded {
+    pub config: Config,
+    /// Active dashboards, in entry order.
+    pub dashboards: Vec<ParsedEntry>,
+    pub secrets: Secrets,
 }
 
 // Debug is written by hand for every type holding a secret, so `{:?}` (and any
 // `tracing` field or panic message that uses it) never prints one.
-const REDACTED: &str = "<redacted>";
+pub const REDACTED: &str = "<redacted>";
 
 impl std::fmt::Debug for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,36 +116,9 @@ impl std::fmt::Debug for Device {
     }
 }
 
-impl std::fmt::Debug for FamilyConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FamilyConfig")
-            .field("switch_at", &self.switch_at)
-            .field("calendar_days", &self.calendar_days)
-            .field("ics_url", &REDACTED)
-            .field("kids", &self.kids)
-            .field("weather", &self.weather)
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for KidConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KidConfig")
-            .field("label", &self.label)
-            .field("librus_login", &REDACTED)
-            .field("librus_password", &REDACTED)
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-pub struct WeatherConfig {
-    pub latitude: f64,
-    pub longitude: f64,
-}
-
 // ---- raw (serde) shapes mirroring the TOML ----
 
+/// Core's part of the file; dashboard sections and unknown keys are ignored here.
 #[derive(Deserialize)]
 struct RawConfig {
     timezone: Tz,
@@ -155,7 +129,6 @@ struct RawConfig {
     schedule: RawSchedule,
     #[serde(default, rename = "device")]
     devices: Vec<RawDevice>,
-    family: RawFamily,
 }
 
 #[derive(Deserialize)]
@@ -182,82 +155,80 @@ struct RawDevice {
     mac: String,
     api_key_secret: Option<String>,
     api_key_env: Option<String>,
-    dashboard: DashboardKind,
+    dashboard: String,
     bit_depth: Option<u8>,
 }
 
-#[derive(Deserialize)]
-struct RawFamily {
-    switch_at: NaiveTime,
-    calendar_days: u32,
-    calendar: RawCalendar,
-    #[serde(default, rename = "kid")]
-    kids: Vec<RawKid>,
-    weather: WeatherConfig,
+/// Resolves secrets from files under one directory or from the environment,
+/// counting every lookup.
+pub struct Secrets {
+    dir: PathBuf,
+    reads: AtomicUsize,
 }
 
-#[derive(Deserialize)]
-struct RawCalendar {
-    ics_url_secret: Option<String>,
-    ics_url_env: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawKid {
-    label: String,
-    librus_login_secret: Option<String>,
-    librus_login_env: Option<String>,
-    librus_password_secret: Option<String>,
-    librus_password_env: Option<String>,
-}
-
-/// Resolve a secret. A secret file wins when it exists; a missing file falls back to
-/// the named environment variable, any other I/O error is reported. Every resolved
-/// value is trimmed. `owner` names the device or kid for error messages.
-fn resolve_secret(
-    owner: &str,
-    key: &str,
-    file: Option<&str>,
-    env: Option<&str>,
-    secrets_dir: &Path,
-) -> Result<String, ConfigError> {
-    if let Some(name) = file {
-        let path = secrets_dir.join(name);
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => return Ok(raw.trim().to_owned()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(ConfigError::SecretIo {
-                    owner: owner.to_owned(),
-                    path,
-                    source,
-                });
-            }
+impl Secrets {
+    pub fn new(dir: PathBuf) -> Secrets {
+        Secrets {
+            dir,
+            reads: AtomicUsize::new(0),
         }
     }
-    if let Some(var) = env {
-        match std::env::var(var) {
-            Ok(raw) => return Ok(raw.trim().to_owned()),
-            Err(_) if file.is_none() => {
-                return Err(ConfigError::UnsetEnv {
-                    owner: owner.to_owned(),
-                    key: key.to_owned(),
-                    var: var.to_owned(),
-                });
+
+    /// Resolve a secret. A secret file wins when it exists; a missing file falls
+    /// back to the named environment variable, any other I/O error is reported.
+    /// Every resolved value is trimmed. `owner` names the device or kid for error
+    /// messages.
+    pub fn resolve(
+        &self,
+        owner: &str,
+        key: &str,
+        file: Option<&str>,
+        env: Option<&str>,
+    ) -> Result<String, ConfigError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(name) = file {
+            let path = self.dir.join(name);
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => return Ok(raw.trim().to_owned()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(ConfigError::SecretIo {
+                        owner: owner.to_owned(),
+                        path,
+                        source,
+                    });
+                }
             }
-            Err(_) => {}
+        }
+        if let Some(var) = env {
+            match std::env::var(var) {
+                Ok(raw) => return Ok(raw.trim().to_owned()),
+                Err(_) if file.is_none() => {
+                    return Err(ConfigError::UnsetEnv {
+                        owner: owner.to_owned(),
+                        key: key.to_owned(),
+                        var: var.to_owned(),
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        match file {
+            Some(name) => Err(ConfigError::MissingSecret {
+                owner: owner.to_owned(),
+                key: key.to_owned(),
+                file: name.to_owned(),
+            }),
+            None => Err(ConfigError::UnsetSecret {
+                owner: owner.to_owned(),
+                key: key.to_owned(),
+            }),
         }
     }
-    match file {
-        Some(name) => Err(ConfigError::MissingSecret {
-            owner: owner.to_owned(),
-            key: key.to_owned(),
-            file: name.to_owned(),
-        }),
-        None => Err(ConfigError::UnsetSecret {
-            owner: owner.to_owned(),
-            key: key.to_owned(),
-        }),
+
+    /// How many times [`Secrets::resolve`] has been called.
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
     }
 }
 
@@ -282,12 +253,22 @@ fn normalize_mac(device: &str, raw: &str) -> Result<String, ConfigError> {
         .join(":"))
 }
 
-pub fn load(path: &Path, secrets_dir: &Path) -> Result<Config, ConfigError> {
+/// Reads globals, devices and then each entry's section, touching only the config and secret files.
+pub fn load(
+    path: &Path,
+    secrets_dir: &Path,
+    entries: &[DashboardEntry],
+) -> Result<Loaded, ConfigError> {
+    validate_names(entries)?;
     let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_owned(),
         source,
     })?;
+    // Parsed twice: the typed pass keeps toml's line/column in error messages,
+    // the table hands each dashboard its own section.
     let raw: RawConfig = toml::from_str(&text)?;
+    let table: toml::Table = toml::from_str(&text)?;
+    let secrets = Secrets::new(secrets_dir.to_owned());
 
     let devices = raw
         .devices
@@ -305,12 +286,11 @@ pub fn load(path: &Path, secrets_dir: &Path) -> Result<Config, ConfigError> {
                 }
             };
             Ok(Device {
-                api_key: resolve_secret(
+                api_key: secrets.resolve(
                     &owner,
                     "api_key",
                     d.api_key_secret.as_deref(),
                     d.api_key_env.as_deref(),
-                    secrets_dir,
                 )?,
                 mac: normalize_mac(&d.name, &d.mac)?,
                 bit_depth,
@@ -320,72 +300,48 @@ pub fn load(path: &Path, secrets_dir: &Path) -> Result<Config, ConfigError> {
         })
         .collect::<Result<Vec<_>, ConfigError>>()?;
 
-    let kids = raw
-        .family
-        .kids
-        .into_iter()
-        .enumerate()
-        .map(|(i, k)| {
-            let owner = format!("kid {} (`{}`)", i + 1, k.label);
-            Ok(KidConfig {
-                librus_login: resolve_secret(
-                    &owner,
-                    "librus_login",
-                    k.librus_login_secret.as_deref(),
-                    k.librus_login_env.as_deref(),
-                    secrets_dir,
-                )?,
-                librus_password: resolve_secret(
-                    &owner,
-                    "librus_password",
-                    k.librus_password_secret.as_deref(),
-                    k.librus_password_env.as_deref(),
-                    secrets_dir,
-                )?,
-                label: k.label,
-            })
-        })
-        .collect::<Result<Vec<_>, ConfigError>>()?;
+    let mut dashboards = Vec::new();
+    for entry in entries {
+        if let Some(parsed) = (entry.parse)(table.get(entry.name), &secrets)? {
+            dashboards.push(ParsedEntry {
+                name: entry.name,
+                parsed,
+            });
+        }
+    }
+    for device in &devices {
+        if !dashboards.iter().any(|d| d.name == device.dashboard) {
+            return Err(ConfigError::UnknownDashboard {
+                device: device.name.clone(),
+                dashboard: device.dashboard.clone(),
+            });
+        }
+    }
 
-    let cal = raw.family.calendar;
-    let ics_url = resolve_secret(
-        "family.calendar",
-        "ics_url",
-        cal.ics_url_secret.as_deref(),
-        cal.ics_url_env.as_deref(),
-        secrets_dir,
-    )?;
-    let ics_url = match ics_url.strip_prefix("webcal://") {
-        Some(rest) => format!("https://{rest}"),
-        None => ics_url,
-    };
-
-    Ok(Config {
-        timezone: raw.timezone,
-        base_url: raw.base_url,
-        listen: raw
-            .listen
-            .unwrap_or_else(|| "0.0.0.0:8080".parse().expect("valid default")),
-        data_dir: raw.data_dir.unwrap_or_else(|| PathBuf::from("/data")),
-        schedule: Schedule {
-            wake: raw.schedule.wake,
-            sleep: raw.schedule.sleep,
-            refresh_minutes: raw.schedule.refresh_minutes,
+    Ok(Loaded {
+        config: Config {
+            timezone: raw.timezone,
+            base_url: raw.base_url,
+            listen: raw
+                .listen
+                .unwrap_or_else(|| "0.0.0.0:8080".parse().expect("valid default")),
+            data_dir: raw.data_dir.unwrap_or_else(|| PathBuf::from("/data")),
+            schedule: Schedule {
+                wake: raw.schedule.wake,
+                sleep: raw.schedule.sleep,
+                refresh_minutes: raw.schedule.refresh_minutes,
+            },
+            devices,
         },
-        devices,
-        family: FamilyConfig {
-            switch_at: raw.family.switch_at,
-            calendar_days: raw.family.calendar_days,
-            ics_url,
-            kids,
-            weather: raw.family.weather,
-        },
+        dashboards,
+        secrets,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::{DashboardEntry, ParseResult};
     use std::fs;
     use std::path::Path;
 
@@ -405,11 +361,26 @@ mod tests {
         }
     }
 
-    fn load_str(toml: &str, secrets: &Path) -> Result<Config, ConfigError> {
+    fn entries() -> Vec<DashboardEntry> {
+        vec![
+            crate::family::dashboard::entry(),
+            crate::dashboards::homelab::entry(),
+        ]
+    }
+
+    fn load_with(
+        toml: &str,
+        secrets: &Path,
+        entries: &[DashboardEntry],
+    ) -> Result<Loaded, ConfigError> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(&path, toml).unwrap();
-        load(&path, secrets)
+        load(&path, secrets, entries)
+    }
+
+    fn load_str(toml: &str, secrets: &Path) -> Result<Config, ConfigError> {
+        load_with(toml, secrets, &entries()).map(|l| l.config)
     }
 
     fn secrets() -> tempfile::TempDir {
@@ -418,27 +389,49 @@ mod tests {
         dir
     }
 
+    fn names(loaded: &Loaded) -> Vec<&'static str> {
+        loaded.dashboards.iter().map(|d| d.name).collect()
+    }
+
+    /// Globals and a valid `[family]` section, no devices.
+    const MINIMAL: &str = r#"
+timezone = "Europe/Warsaw"
+base_url = "http://x"
+
+[family]
+switch_at = "16:00"
+calendar_days = 7
+
+[family.calendar]
+ics_url_secret = "icloud_ics_url"
+
+[family.weather]
+latitude = 1.0
+longitude = 2.0
+"#;
+
+    const DEVICE_KEY: &str = r#"
+mac = "AA:BB:CC:DD:EE:01"
+api_key_secret = "trmnl_kitchen_key"
+"#;
+
     #[test]
-    fn debug_output_never_contains_secrets() {
+    fn devices_debug_never_contains_secrets() {
         let dir = tempfile::tempdir().unwrap();
+        write_secrets(dir.path());
         let secrets = [
             ("trmnl_kitchen_key", "SECRETKEY-kitchen"),
             ("trmnl_office_key", "SECRETKEY-office"),
-            ("icloud_ics_url", "webcal://SECRETICS.example.com/cal.ics"),
-            ("librus_kid1_login", "SECRETLOGIN1"),
-            ("librus_kid1_password", "SECRETPASS1"),
-            ("librus_kid2_login", "SECRETLOGIN2"),
-            ("librus_kid2_password", "SECRETPASS2"),
         ];
         for (name, value) in secrets {
             fs::write(dir.path().join(name), value).unwrap();
         }
         let c = load_str(SAMPLE, dir.path()).unwrap();
+        assert_eq!(c.devices[0].api_key, "SECRETKEY-kitchen");
         let dumps = [
             format!("{c:?}"),
             format!("{c:#?}"),
             format!("{:?}", c.devices),
-            format!("{:?}", c.family),
         ];
         for dump in &dumps {
             for (_, value) in secrets {
@@ -450,53 +443,102 @@ mod tests {
     }
 
     #[test]
-    fn loads_sample_config() {
+    fn sample_config_loads() {
         let s = secrets();
-        let c = load_str(SAMPLE, s.path()).unwrap();
+        let loaded = load_with(SAMPLE, s.path(), &entries()).unwrap();
+        assert_eq!(names(&loaded), ["family", "homelab"]);
+        let c = &loaded.config;
         assert_eq!(c.timezone, chrono_tz::Europe::Warsaw);
         assert_eq!(c.devices.len(), 2);
         let family = &c.devices[0];
         assert_eq!(family.name, "kitchen");
-        assert_eq!(family.dashboard, DashboardKind::Family);
+        assert_eq!(family.dashboard, "family");
         assert_eq!(family.bit_depth, BitDepth::Two);
         assert_eq!(family.api_key, "kitchen-key");
-        assert_eq!(c.devices[1].dashboard, DashboardKind::Homelab);
-        assert_eq!(
-            c.family.switch_at,
-            chrono::NaiveTime::from_hms_opt(16, 0, 0).unwrap()
+        assert_eq!(c.devices[1].dashboard, "homelab");
+    }
+
+    #[test]
+    fn missing_family_is_an_error_with_zero_devices() {
+        let s = secrets();
+        let toml = "timezone = \"Europe/Warsaw\"\nbase_url = \"http://x\"\n";
+        let err = load_str(toml, s.path()).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Dashboard { section, .. } if section == "family"),
+            "{err}"
         );
-        assert_eq!(c.family.calendar_days, 7);
-        assert_eq!(c.family.kids.len(), 2);
-        assert_eq!(c.family.kids[1].librus_login, "kid2");
     }
 
     #[test]
-    fn secret_file_wins_and_is_trimmed() {
+    fn malformed_family_is_an_error_with_zero_devices() {
         let s = secrets();
-        fs::write(s.path().join("librus_kid1_password"), "s3cret\n").unwrap();
-        let c = load_str(SAMPLE, s.path()).unwrap();
-        assert_eq!(c.family.kids[0].librus_password, "s3cret");
-    }
-
-    #[test]
-    fn env_form_reads_environment() {
-        let s = secrets();
-        // SAFETY: the variable name is unique to this test, so no other thread touches it.
-        unsafe { std::env::set_var("TABLICA_TEST_PW", "  from-env \n") };
-        let toml = SAMPLE.replace(
-            "librus_password_secret = \"librus_kid1_password\"",
-            "librus_password_env = \"TABLICA_TEST_PW\"",
+        let toml = MINIMAL.replace("switch_at = \"16:00\"", "switch_at = 5");
+        let err = load_str(&toml, s.path()).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Dashboard { section, message }
+                if section == "family" && message.contains("switch_at")),
+            "{err}"
         );
-        let c = load_str(&toml, s.path()).unwrap();
-        assert_eq!(c.family.kids[0].librus_password, "from-env");
     }
 
     #[test]
-    fn missing_secret_is_error_naming_key() {
+    fn device_referencing_unregistered_dashboard_is_rejected() {
         let s = secrets();
-        fs::remove_file(s.path().join("librus_kid1_password")).unwrap();
-        let err = load_str(SAMPLE, s.path()).unwrap_err();
-        assert!(err.to_string().contains("librus_kid1_password"), "{err}");
+        let toml =
+            format!("{MINIMAL}\n[[device]]\nname = \"shed\"\ndashboard = \"garden\"\n{DEVICE_KEY}");
+        let err = load_str(&toml, s.path()).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownDashboard { device, dashboard }
+                if device == "shed" && dashboard == "garden"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn device_referencing_inactive_dashboard_is_rejected() {
+        fn inactive(_: Option<&toml::Value>, _: &Secrets) -> ParseResult {
+            Ok(None)
+        }
+        let s = secrets();
+        let mut entries = entries();
+        entries.push(DashboardEntry {
+            name: "stubby",
+            parse: inactive,
+        });
+        let toml =
+            format!("{MINIMAL}\n[[device]]\nname = \"shed\"\ndashboard = \"stubby\"\n{DEVICE_KEY}");
+        let err = load_with(&toml, s.path(), &entries).err().unwrap();
+        assert!(
+            matches!(&err, ConfigError::UnknownDashboard { dashboard, .. } if dashboard == "stubby"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn invalid_entry_names_are_rejected() {
+        let s = secrets();
+        let mut entries = entries();
+        entries.push(crate::dashboards::homelab::entry());
+        let err = load_with(MINIMAL, s.path(), &entries).err().unwrap();
+        assert!(
+            matches!(err, ConfigError::InvalidDashboardName { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_section_is_ignored() {
+        let s = secrets();
+        let toml = format!("{MINIMAL}\n[weather_station]\nx = 1\n");
+        assert!(load_str(&toml, s.path()).is_ok());
+    }
+
+    #[test]
+    fn homelab_section_with_keys_is_ignored() {
+        let s = secrets();
+        let toml = format!("{MINIMAL}\n[homelab]\ntoken = \"x\"\n");
+        let loaded = load_with(&toml, s.path(), &entries()).unwrap();
+        assert!(names(&loaded).contains(&"homelab"));
     }
 
     #[test]
@@ -513,22 +555,7 @@ mod tests {
     #[test]
     fn defaults_apply() {
         let s = secrets();
-        let toml = r#"
-timezone = "Europe/Warsaw"
-base_url = "http://x"
-
-[family]
-switch_at = "16:00"
-calendar_days = 7
-
-[family.calendar]
-ics_url_secret = "icloud_ics_url"
-
-[family.weather]
-latitude = 1.0
-longitude = 2.0
-"#;
-        let c = load_str(toml, s.path()).unwrap();
+        let c = load_str(MINIMAL, s.path()).unwrap();
         assert_eq!(c.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(c.data_dir, Path::new("/data"));
         assert_eq!(
@@ -540,7 +567,6 @@ longitude = 2.0
             chrono::NaiveTime::from_hms_opt(22, 0, 0).unwrap()
         );
         assert_eq!(c.schedule.refresh_minutes, 15);
-        assert_eq!(c.family.ics_url, "https://example.com/cal.ics");
         assert!(c.devices.is_empty());
     }
 
@@ -565,18 +591,6 @@ longitude = 2.0
     }
 
     #[test]
-    fn unset_env_var_error_names_it_and_owner() {
-        let s = secrets();
-        let toml = SAMPLE.replace(
-            "librus_password_secret = \"librus_kid1_password\"",
-            "librus_password_env = \"TABLICA_TEST_UNSET_VAR\"",
-        );
-        let err = load_str(&toml, s.path()).unwrap_err().to_string();
-        assert!(err.contains("TABLICA_TEST_UNSET_VAR"), "{err}");
-        assert!(err.contains("Kid 1"), "{err}");
-    }
-
-    #[test]
     fn unreadable_secret_surfaces_io_error() {
         let s = secrets();
         // A directory in place of the file: exists, but cannot be read as a file.
@@ -585,5 +599,30 @@ longitude = 2.0
         let err = load_str(SAMPLE, s.path()).unwrap_err();
         assert!(matches!(err, ConfigError::SecretIo { .. }), "{err}");
         assert!(err.to_string().contains("kitchen"), "{err}");
+    }
+
+    #[test]
+    fn secrets_count_reads() {
+        let s = secrets();
+        let secrets = Secrets::new(s.path().to_owned());
+        assert_eq!(secrets.reads(), 0);
+        secrets
+            .resolve(
+                "device `kitchen`",
+                "api_key",
+                Some("trmnl_kitchen_key"),
+                None,
+            )
+            .unwrap();
+        let _ = secrets.resolve("device `x`", "api_key", Some("absent"), None);
+        assert_eq!(secrets.reads(), 2);
+    }
+
+    #[test]
+    fn loader_reads_each_secret_once() {
+        let s = secrets();
+        let loaded = load_with(SAMPLE, s.path(), &entries()).unwrap();
+        // Two device keys, the calendar URL, and a login and a password per kid.
+        assert_eq!(loaded.secrets.reads(), 7);
     }
 }

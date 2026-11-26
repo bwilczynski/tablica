@@ -5,7 +5,7 @@ use chrono_tz::{Europe::Warsaw, Tz};
 
 use super::family::{self, FamilyInputs, FamilyView};
 use crate::cache::Stamped;
-use crate::config::{FamilyConfig, KidConfig, WeatherConfig};
+use crate::family::config::{FamilyConfig, KidConfig, WeatherConfig};
 use crate::sources::calendar::IcsSnapshot;
 use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::{Daily, HourlyPrecip, Weather};
