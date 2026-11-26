@@ -42,6 +42,21 @@ Use the compose example in `contrib/docker/docker-compose.yaml`:
 To capture Librus fixtures from a real account, run
 `tablica capture librus --config <config> --secrets-dir <dir> --out <dir>`.
 
+## Contributing
+
+```sh
+mise run lint    # clippy and rustfmt
+mise run test    # Rust tests
+```
+
+Commits and pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/).
+`feat` and `fix` changes open a release PR (version bump and `CHANGELOG.md`); merging it tags the
+version, creates a GitHub release and publishes the image to
+`ghcr.io/bwilczynski/tablica` as `<version>` and `latest`. The release workflow needs the
+`RELEASE_PLZ_TOKEN` repository secret: a fine-grained PAT for this repository with Contents
+and Pull requests read/write (see [release-plz.toml](release-plz.toml) for recovering a
+release that failed after tagging).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The Librus login flow is ported from
