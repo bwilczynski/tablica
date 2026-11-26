@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tablica::cache::Caches;
 use tablica::config::Config;
 use tablica::device_api::{self, AppState, ImageStore};
+use tablica::family::FamilyCaches;
 use tablica::render::{Renderer, TemplateSource};
 use tablica::scheduler::{self, Sources};
 use tokio::signal::unix::{SignalKind, signal};
@@ -87,7 +87,7 @@ fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
 
 async fn serve(cfg: Config, templates: Option<PathBuf>) -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
-    let caches = Arc::new(Caches::open(&cfg.data_dir, cfg.family.kids.len()));
+    let caches = Arc::new(FamilyCaches::open(&cfg.data_dir, cfg.family.kids.len()));
     let source = match templates {
         Some(dir) => TemplateSource::Dir(dir),
         None => TemplateSource::Embedded,

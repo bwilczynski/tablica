@@ -18,12 +18,11 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use crate::cache::{
-    CALENDAR_MAX_AGE, Caches, SourceCache, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE, is_stale,
-};
+use crate::cache::{SourceCache, is_stale};
 use crate::config::{BitDepth, Config, DashboardKind, Device};
 use crate::dashboards::family::{self, FamilyInputs};
 use crate::dashboards::homelab;
+use crate::family::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
 use crate::render::Renderer;
 pub use images::ImageStore;
 pub use refresh::refresh_rate;
@@ -34,7 +33,7 @@ pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<Config>,
-    pub caches: Arc<Caches>,
+    pub caches: Arc<FamilyCaches>,
     pub renderer: Arc<Renderer>,
     pub images: Arc<ImageStore>,
     pub clock: Clock,
@@ -68,7 +67,7 @@ fn depth_number(depth: BitDepth) -> u8 {
 /// Renders a dashboard from the cached source data as of `now`. CPU-bound.
 pub fn render_dashboard(
     cfg: &Config,
-    caches: &Caches,
+    caches: &FamilyCaches,
     renderer: &Renderer,
     kind: DashboardKind,
     now: DateTime<Utc>,
@@ -376,7 +375,7 @@ mod tests {
         let now = warsaw(2026, 11, 25, 7, 0);
         let dir = tempfile::tempdir().unwrap();
         let sample = sample_inputs(now);
-        let caches = Caches::open(dir.path(), 2);
+        let caches = FamilyCaches::open(dir.path(), 2);
         if let Some(c) = sample.calendar {
             caches.calendar.put(c.data, c.fetched_at).unwrap();
         }
@@ -703,7 +702,7 @@ mod tests {
         // An empty cache is stale with no timestamp.
         let empty = tempfile::tempdir().unwrap();
         let state = AppState {
-            caches: Arc::new(Caches::open(empty.path(), 2)),
+            caches: Arc::new(FamilyCaches::open(empty.path(), 2)),
             ..f.state.clone()
         };
         let (_, body) = send_json(&state, get("/healthz", &[])).await;

@@ -6,8 +6,9 @@ use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
 
-use crate::cache::{CALENDAR_MAX_AGE, Stamped, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE, is_stale};
+use crate::cache::{Stamped, is_stale};
 use crate::config::FamilyConfig;
+use crate::family::{CALENDAR_MAX_AGE, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
 use crate::sources::calendar::{self, CalendarEvent, EventWhen, IcsSnapshot};
 use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::Weather;
