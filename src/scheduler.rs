@@ -9,8 +9,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::cache::{Caches, SourceCache};
+use crate::cache::SourceCache;
 use crate::config::{Config, KidConfig};
+use crate::family::FamilyCaches;
 use crate::polling::backoff_delay;
 use crate::sources::SourceError;
 use crate::sources::calendar::{self, FetchOutcome, IcsSnapshot};
@@ -208,7 +209,7 @@ fn librus_next_wait(
 async fn librus_loop(
     tz: Tz,
     kid: KidConfig,
-    caches: Arc<Caches>,
+    caches: Arc<FamilyCaches>,
     index: usize,
     urls: LibrusUrls,
     shutdown: CancellationToken,
@@ -234,7 +235,7 @@ async fn librus_loop(
 /// until `shutdown` is cancelled.
 pub fn spawn_all(
     cfg: Arc<Config>,
-    caches: Arc<Caches>,
+    caches: Arc<FamilyCaches>,
     sources: Sources,
     shutdown: CancellationToken,
 ) -> Vec<JoinHandle<()>> {

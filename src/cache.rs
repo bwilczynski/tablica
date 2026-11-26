@@ -1,20 +1,12 @@
 //! JSON-backed cache holding the last good data of one source.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-
-use crate::sources::calendar::IcsSnapshot;
-use crate::sources::librus::timetable::Timetable;
-use crate::sources::weather::Weather;
-
-pub const CALENDAR_MAX_AGE: Duration = Duration::hours(2);
-pub const TIMETABLE_MAX_AGE: Duration = Duration::hours(26);
-pub const WEATHER_MAX_AGE: Duration = Duration::hours(3);
 
 /// Data together with the moment it was fetched.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,27 +103,6 @@ impl<T: Serialize + DeserializeOwned + Clone> SourceCache<T> {
     }
 }
 
-/// All source caches, one JSON file each under the data directory.
-pub struct Caches {
-    pub calendar: SourceCache<IcsSnapshot>,
-    pub weather: SourceCache<Weather>,
-    /// One cache per kid, in config order.
-    pub timetables: Vec<SourceCache<Timetable>>,
-}
-
-impl Caches {
-    /// Opens `calendar.json`, `weather.json` and `timetable-kid{N}.json` (N from 1).
-    pub fn open(data_dir: &Path, kids: usize) -> Caches {
-        Caches {
-            calendar: SourceCache::open(data_dir.join("calendar.json")),
-            weather: SourceCache::open(data_dir.join("weather.json")),
-            timetables: (1..=kids)
-                .map(|n| SourceCache::open(data_dir.join(format!("timetable-kid{n}.json"))))
-                .collect(),
-        }
-    }
-}
-
 /// True when the data is strictly older than `max_age`.
 pub fn is_stale(fetched_at: DateTime<Utc>, now: DateTime<Utc>, max_age: Duration) -> bool {
     now - fetched_at > max_age
@@ -202,41 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn caches_use_expected_file_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let caches = Caches::open(dir.path(), 2);
-        assert_eq!(caches.timetables.len(), 2);
-        let snap = IcsSnapshot {
-            text: "ics".into(),
-            etag: None,
-        };
-        caches.calendar.put(snap.clone(), t(8)).unwrap();
-        let timetable = Timetable {
-            weeks: vec![],
-            days: Default::default(),
-        };
-        caches.timetables[1].put(timetable.clone(), t(9)).unwrap();
-        assert!(dir.path().join("calendar.json").exists());
-        assert!(dir.path().join("timetable-kid2.json").exists());
-        assert!(!dir.path().join("timetable-kid1.json").exists());
-
-        let again = Caches::open(dir.path(), 2);
-        assert_eq!(again.calendar.get().unwrap().data, snap);
-        assert!(again.timetables[0].get().is_none());
-        assert_eq!(again.timetables[1].get().unwrap().data, timetable);
-        assert!(again.weather.get().is_none());
-    }
-
-    #[test]
     fn cache_is_send_sync() {
         fn assert_ss<X: Send + Sync>() {}
         assert_ss::<SourceCache<Vec<String>>>();
-    }
-
-    #[test]
-    fn max_ages() {
-        assert_eq!(CALENDAR_MAX_AGE, Duration::hours(2));
-        assert_eq!(TIMETABLE_MAX_AGE, Duration::hours(26));
-        assert_eq!(WEATHER_MAX_AGE, Duration::hours(3));
     }
 }
