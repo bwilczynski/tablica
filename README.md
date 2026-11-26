@@ -41,3 +41,9 @@ Use the compose example in `contrib/docker/docker-compose.yaml`:
 
 To capture Librus fixtures from a real account, run
 `tablica capture librus --config <config> --secrets-dir <dir> --out <dir>`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The Librus login flow is ported from
+[librus-api](https://github.com/Mati365/librus-api) (MIT), and the Inter font is under
+the SIL Open Font License; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
