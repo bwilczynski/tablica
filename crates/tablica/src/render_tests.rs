@@ -1,6 +1,7 @@
-//! Renders the real family and homelab templates, embedded and from a directory.
+//! Renders the real family and homelab bundles together, and serves them through the
+//! device API.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -8,39 +9,18 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tower::ServiceExt;
-
-use crate::dashboards::family::FamilyView;
-use crate::dashboards::homelab::{self, HomelabDashboard};
-use crate::dashboards::test_support::{
-    sample_inputs, sample_view_evening, sample_view_morning, time, warsaw, worst_case_view,
-};
-use crate::family::dashboard::{Endpoints, ParsedFamily};
 use tablica_core::config::{BitDepth, Config, Device, Schedule};
-use tablica_core::dashboard::{Active, Dashboard, ParsedDashboard, PrepareContext, View};
+use tablica_core::dashboard::{Active, Dashboard, View};
 use tablica_core::device_api::{AppState, ImageStore, router};
-use tablica_core::render::{MAX_PNG_BYTES, Renderer, TemplateSource};
-
-fn templates_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("templates")
-}
+use tablica_core::render::{Renderer, TemplateSource};
+use tablica_family::test_support::{sample_view_morning, seeded_family, time, warsaw};
+use tablica_homelab::HomelabDashboard;
+use tower::ServiceExt;
 
 /// Family (caches seeded with the sample at 07:00 Warsaw) and homelab, as served.
 fn active(data_dir: &Path) -> Active {
-    let sample = sample_inputs(warsaw(2026, 11, 25, 7, 0));
-    sample.seed(data_dir);
-    let ctx = PrepareContext {
-        timezone: chrono_tz::Europe::Warsaw,
-        data_dir,
-    };
-    let family = Box::new(ParsedFamily {
-        cfg: sample.cfg,
-        endpoints: Endpoints::default(),
-    })
-    .prepare(&ctx)
-    .unwrap();
     let homelab: Arc<dyn Dashboard> = Arc::new(HomelabDashboard);
-    Active::from([("family", family), ("homelab", homelab)])
+    Active::from([("family", seeded_family(data_dir)), ("homelab", homelab)])
 }
 
 fn renderer(src: TemplateSource) -> Renderer {
@@ -48,25 +28,19 @@ fn renderer(src: TemplateSource) -> Renderer {
     Renderer::new(src, &active(dir.path())).unwrap()
 }
 
-fn family_view(view: FamilyView) -> View {
+fn family_view() -> View {
     View {
         template: "family.html",
-        context: minijinja::Value::from_serialize(view),
+        context: minijinja::Value::from_serialize(sample_view_morning()),
     }
 }
 
 fn homelab_view() -> View {
-    View {
-        template: "homelab.html",
-        context: minijinja::Value::from_serialize(homelab::build()),
-    }
+    HomelabDashboard.view(warsaw(2026, 11, 25, 7, 0)).unwrap()
 }
 
-fn dims(png_bytes: &[u8]) -> (u32, u32, png::BitDepth) {
-    let r = png::Decoder::new(std::io::Cursor::new(png_bytes))
-        .read_info()
-        .unwrap();
-    (r.info().width, r.info().height, r.info().bit_depth)
+fn crate_dir(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(name)
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -82,84 +56,31 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-#[test]
-fn family_render_is_valid_png() {
-    let r = renderer(TemplateSource::Embedded);
-    for (depth, bits) in [
-        (BitDepth::Two, png::BitDepth::Two),
-        (BitDepth::One, png::BitDepth::One),
-    ] {
-        let png = r
-            .render("family", &family_view(sample_view_morning()), depth)
-            .unwrap();
-        assert_eq!(dims(&png), (800, 480, bits));
-        assert!(png.len() <= MAX_PNG_BYTES, "{} bytes", png.len());
-    }
-}
-
-#[test]
-fn worst_case_family_render_fits_size_limit() {
-    let r = renderer(TemplateSource::Embedded);
-    for depth in [BitDepth::Two, BitDepth::One] {
-        let png = r
-            .render("family", &family_view(worst_case_view()), depth)
-            .unwrap();
-        assert_eq!((dims(&png).0, dims(&png).1), (800, 480));
-        assert!(png.len() <= MAX_PNG_BYTES, "{} bytes", png.len());
-    }
-}
-
-#[test]
-fn homelab_render_is_valid_png() {
-    let png = renderer(TemplateSource::Embedded)
-        .render("homelab", &homelab_view(), BitDepth::Two)
-        .unwrap();
-    assert_eq!(dims(&png), (800, 480, png::BitDepth::Two));
+/// The flat `--templates` layout: family's and homelab's bundles side by side
+/// (`family.html`, `homelab.html`, `icons/`), copied into a fresh directory.
+fn flat_templates() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&crate_dir("family/templates"), tmp.path());
+    copy_dir(&crate_dir("homelab/templates"), tmp.path());
+    tmp
 }
 
 #[test]
 fn embedded_and_dir_templates_match() {
     let embedded = renderer(TemplateSource::Embedded);
-    let dir = renderer(TemplateSource::Dir(templates_dir()));
-    let view = family_view(sample_view_morning());
-    let a = embedded.render("family", &view, BitDepth::Two).unwrap();
-    let b = dir.render("family", &view, BitDepth::Two).unwrap();
-    assert_eq!(a, b);
-    let a = embedded
-        .render("homelab", &homelab_view(), BitDepth::Two)
-        .unwrap();
-    let b = dir
-        .render("homelab", &homelab_view(), BitDepth::Two)
-        .unwrap();
-    assert_eq!(a, b);
-}
-
-/// Writes preview PNGs to `<workspace root>/target/preview/` for eyeballing against the mockup.
-#[test]
-fn write_previews() {
-    let r = renderer(TemplateSource::Embedded);
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
-    std::fs::create_dir_all(&out).unwrap();
-    let jobs = [
-        ("family-morning-2bit", sample_view_morning(), BitDepth::Two),
-        ("family-evening-2bit", sample_view_evening(), BitDepth::Two),
-        ("family-morning-1bit", sample_view_morning(), BitDepth::One),
-        ("family-worst-2bit", worst_case_view(), BitDepth::Two),
-    ];
-    for (name, view, depth) in jobs {
-        let png = r.render("family", &family_view(view), depth).unwrap();
-        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    let flat = flat_templates();
+    let dir = renderer(TemplateSource::Dir(flat.path().to_owned()));
+    for (name, view) in [("family", family_view()), ("homelab", homelab_view())] {
+        let a = embedded.render(name, &view, BitDepth::Two).unwrap();
+        let b = dir.render(name, &view, BitDepth::Two).unwrap();
+        assert_eq!(a, b, "{name}");
     }
 }
 
 #[test]
 fn dir_templates_reload_after_edit() {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        templates_dir().join("homelab.html"),
-        tmp.path().join("homelab.html"),
-    )
-    .unwrap();
+    copy_dir(&crate_dir("homelab/templates"), tmp.path());
     let r = renderer(TemplateSource::Dir(tmp.path().to_path_buf()));
     let before = r.render("homelab", &homelab_view(), BitDepth::Two).unwrap();
     let edited = std::fs::read_to_string(tmp.path().join("homelab.html"))
@@ -167,25 +88,6 @@ fn dir_templates_reload_after_edit() {
         .replace("font-size: 48px", "font-size: 24px");
     std::fs::write(tmp.path().join("homelab.html"), edited).unwrap();
     let after = r.render("homelab", &homelab_view(), BitDepth::Two).unwrap();
-    assert_ne!(before, after);
-}
-
-#[test]
-fn dir_reload_after_editing_included_svg() {
-    let tmp = tempfile::tempdir().unwrap();
-    copy_dir(&templates_dir(), tmp.path());
-    let r = renderer(TemplateSource::Dir(tmp.path().to_path_buf()));
-    let view = family_view(sample_view_morning());
-    // The sample's current weather is cloudy, so the header includes this icon.
-    let icon = tmp.path().join("icons/cloudy.svg");
-    assert!(icon.exists());
-    let before = r.render("family", &view, BitDepth::Two).unwrap();
-    std::fs::write(
-        &icon,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="0" y="0" width="24" height="24" fill="black"/></svg>"#,
-    )
-    .unwrap();
-    let after = r.render("family", &view, BitDepth::Two).unwrap();
     assert_ne!(before, after);
 }
 
@@ -253,15 +155,7 @@ async fn send(state: &AppState, uri: &str, token: Option<&str>) -> (StatusCode, 
 #[tokio::test]
 async fn family_only_override_dir() {
     let templates = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        templates_dir().join("family.html"),
-        templates.path().join("family.html"),
-    )
-    .unwrap();
-    copy_dir(
-        &templates_dir().join("icons"),
-        &templates.path().join("icons"),
-    );
+    copy_dir(&crate_dir("family/templates"), templates.path());
     let src = || TemplateSource::Dir(templates.path().to_owned());
 
     let data = tempfile::tempdir().unwrap();

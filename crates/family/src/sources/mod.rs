@@ -7,11 +7,17 @@ pub mod weather;
 #[cfg(test)]
 pub(crate) mod test_logs {
     /// In-memory log sink: DEBUG and up, for the life of the returned guard.
+    /// Records from the `log` crate (which `rrule` uses) are captured too, as the
+    /// binary's subscriber forwards them.
     #[derive(Clone, Default)]
     pub(crate) struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl Logs {
         pub(crate) fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+            static BRIDGE: std::sync::Once = std::sync::Once::new();
+            BRIDGE.call_once(|| {
+                tracing_log::LogTracer::init().expect("no other log bridge in tests");
+            });
             let logs = Self::default();
             let sink = logs.clone();
             let sub = tracing_subscriber::fmt()

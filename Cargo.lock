@@ -3230,30 +3230,17 @@ dependencies = [
  "chrono-tz",
  "clap",
  "http-body-util",
- "icalendar",
- "image",
  "minijinja",
- "minijinja-autoreload",
- "minijinja-embed",
- "png",
- "rand 0.10.4",
- "reqwest",
- "rrule",
- "scraper",
- "serde",
  "serde_json",
- "sha2",
  "tablica-core",
- "takumi",
+ "tablica-family",
+ "tablica-homelab",
  "tempfile",
- "thiserror",
  "tokio",
- "tokio-util",
  "toml",
  "tower",
  "tracing",
  "tracing-subscriber",
- "wiremock",
 ]
 
 [[package]]
@@ -3281,6 +3268,56 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "tablica-family"
+version = "0.1.3"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "chrono-tz",
+ "http-body-util",
+ "icalendar",
+ "minijinja",
+ "minijinja-embed",
+ "png",
+ "rand 0.10.4",
+ "reqwest",
+ "rrule",
+ "scraper",
+ "serde",
+ "serde_json",
+ "tablica-core",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "tablica-homelab"
+version = "0.1.3"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "minijinja",
+ "minijinja-embed",
+ "png",
+ "serde",
+ "serde_json",
+ "tablica-core",
+ "tokio",
+ "tokio-util",
+ "toml",
 ]
 
 [[package]]

@@ -6,8 +6,8 @@ use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
 
-use crate::family::config::FamilyConfig;
-use crate::family::{CALENDAR_MAX_AGE, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
+use crate::caches::{CALENDAR_MAX_AGE, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
+use crate::config::FamilyConfig;
 use crate::sources::calendar::{self, CalendarEvent, EventWhen, IcsSnapshot};
 use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::Weather;
@@ -586,7 +586,7 @@ fn subject_list(lessons: &[Lesson]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboards::test_support::*;
+    use crate::test_support::*;
     use chrono::Duration;
 
     fn kid_tt(days: &[(NaiveDate, Vec<Lesson>)]) -> Stamped<Timetable> {

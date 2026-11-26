@@ -11,15 +11,15 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::dashboards::family::{self, FamilyInputs};
-use crate::family::config::{FamilyConfig, KidConfig, parse_config};
-use crate::family::polling::{
+use crate::caches::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
+use crate::config::{FamilyConfig, KidConfig, parse_config};
+use crate::polling::{
     CALENDAR_EVERY, INTERVAL_SPREAD, PlannedRuns, TimetablePolicy, WEATHER_EVERY, fresh_rng,
     to_outcome,
 };
-use crate::family::refresh::{refresh_calendar_once, refresh_timetable_once, refresh_weather_once};
-use crate::family::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
+use crate::refresh::{refresh_calendar_once, refresh_timetable_once, refresh_weather_once};
 use crate::sources::librus::LibrusUrls;
+use crate::view::{self, FamilyInputs};
 use tablica_core::cache::{SourceCache, source_health};
 use tablica_core::config::{Loaded, Secrets};
 use tablica_core::dashboard::{
@@ -173,7 +173,7 @@ impl Dashboard for FamilyDashboard {
             .iter()
             .map(SourceCache::get)
             .collect();
-        let view = family::build(&FamilyInputs {
+        let view = view::build(&FamilyInputs {
             now,
             cfg: &self.cfg,
             calendar: calendar.as_ref(),
@@ -252,7 +252,7 @@ fn parse(section: Option<&toml::Value>, secrets: &Secrets) -> ParseResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboards::test_support::{config, sample_inputs, warsaw};
+    use crate::test_support::{config, sample_inputs, warsaw};
     use wiremock::MockServer;
 
     /// A family dashboard over `dir`, seeded with the sample data when `seeded`.
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(view.template, "family.html");
         assert_eq!(
             view.context,
-            minijinja::Value::from_serialize(family::build(&sample.inputs(now)))
+            minijinja::Value::from_serialize(view::build(&sample.inputs(now)))
         );
         assert_eq!(family.switch_at(), Some(sample.cfg.switch_at));
     }
@@ -359,7 +359,7 @@ mod tests {
         let dashboard = Box::new(parsed).prepare(&ctx).unwrap();
         assert_eq!(
             dashboard.view(now).unwrap().context,
-            minijinja::Value::from_serialize(family::build(&sample.inputs(now)))
+            minijinja::Value::from_serialize(view::build(&sample.inputs(now)))
         );
     }
 

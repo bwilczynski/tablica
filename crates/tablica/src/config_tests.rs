@@ -22,10 +22,7 @@ fn write_secrets(dir: &Path) {
 }
 
 fn entries() -> Vec<DashboardEntry> {
-    vec![
-        crate::family::dashboard::entry(),
-        crate::dashboards::homelab::entry(),
-    ]
+    vec![tablica_family::entry(), tablica_homelab::entry()]
 }
 
 fn load_with(
@@ -178,7 +175,7 @@ fn device_referencing_inactive_dashboard_is_rejected() {
 fn invalid_entry_names_are_rejected() {
     let s = secrets();
     let mut entries = entries();
-    entries.push(crate::dashboards::homelab::entry());
+    entries.push(tablica_homelab::entry());
     let err = load_with(MINIMAL, s.path(), &entries).err().unwrap();
     assert!(
         matches!(err, ConfigError::InvalidDashboardName { .. }),

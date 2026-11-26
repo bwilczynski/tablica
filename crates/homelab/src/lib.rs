@@ -1,4 +1,4 @@
-//! Homelab dashboard view model (placeholder until the dashboard exists).
+//! Homelab dashboard (placeholder until the dashboard exists).
 
 use serde::Serialize;
 
@@ -10,10 +10,12 @@ use chrono_tz::Tz;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::text::pl;
 use tablica_core::dashboard::{
     Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
 };
+
+/// What the placeholder template shows.
+const HOMELAB_PLACEHOLDER: &str = "Homelab: wkrótce";
 
 /// Homelab takes no config; any `[homelab]` keys are ignored.
 pub struct ParsedHomelab;
@@ -65,19 +67,20 @@ fn parse(_section: Option<&toml::Value>, _secrets: &Secrets) -> ParseResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct HomelabView {
+struct HomelabView {
     pub message: &'static str,
 }
 
-pub fn build() -> HomelabView {
+fn build() -> HomelabView {
     HomelabView {
-        message: pl::HOMELAB_PLACEHOLDER,
+        message: HOMELAB_PLACEHOLDER,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn shows_placeholder() {
@@ -86,7 +89,9 @@ mod tests {
 
     #[test]
     fn homelab_view_is_placeholder() {
-        let now = crate::dashboards::test_support::warsaw(2026, 11, 25, 7, 0);
+        let now = chrono_tz::Europe::Warsaw
+            .with_ymd_and_hms(2026, 11, 25, 7, 0, 0)
+            .unwrap();
         let view = HomelabDashboard.view(now).unwrap();
         assert_eq!(view.template, "homelab.html");
         assert_eq!(
@@ -98,5 +103,32 @@ mod tests {
             serde_json::json!({})
         );
         assert!(HomelabDashboard.switch_at().is_none());
+    }
+
+    #[test]
+    fn embedded_bundle_renders_a_valid_png() {
+        use tablica_core::config::BitDepth;
+        use tablica_core::dashboard::Active;
+        use tablica_core::render::{Renderer, TemplateSource};
+
+        let dashboard: Arc<dyn Dashboard> = Arc::new(HomelabDashboard);
+        let now = chrono_tz::Europe::Warsaw
+            .with_ymd_and_hms(2026, 11, 25, 7, 0, 0)
+            .unwrap();
+        let view = dashboard.view(now).unwrap();
+        let r = Renderer::new(
+            TemplateSource::Embedded,
+            &Active::from([("homelab", dashboard)]),
+        )
+        .unwrap();
+        let png = r.render("homelab", &view, BitDepth::Two).unwrap();
+        let info = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let info = info.info();
+        assert_eq!(
+            (info.width, info.height, info.bit_depth),
+            (800, 480, png::BitDepth::Two)
+        );
     }
 }
