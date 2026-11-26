@@ -21,7 +21,7 @@ all kids log in at the same instant. We want:
 - A generic `polling` module (policy trait + runner) with **no imports of
   family types**.
 - Family-specific policies and wiring live in family-owned code.
-- Daily Librus logins per kid on a school day stay at or below today's 9.
+- Daily Librus logins per kid on a school day stay around today's 9 (never above 11).
 
 ## Non-goals
 
@@ -79,15 +79,15 @@ pub enum Outcome { Ok, Failed, Rejected }   // Rejected = never retry
 pub trait PollPolicy: Send {
     /// When to run next, given the local time just after a run and its outcome.
     fn next_run(&mut self, now: DateTime<Tz>, outcome: Outcome) -> DateTime<Tz>;
-    /// Delay before the very first run after startup.
-    fn initial_delay(&mut self) -> Duration;
+    /// When to run first after startup.
+    fn first_run(&mut self, now: DateTime<Tz>) -> DateTime<Tz>;
 }
 
 pub async fn run_poller<P, F, Fut>(tz: Tz, policy: P, shutdown: CancellationToken, job: F)
 where F: FnMut() -> Fut, Fut: Future<Output = Outcome>;
 ```
 
-`run_poller` replaces both `every` and `librus_loop`: sleep `initial_delay`,
+`run_poller` replaces both `every` and `librus_loop`: sleep until `first_run`,
 run the job, ask the policy for the next time, sleep, repeat; exits on
 shutdown. Policies own their RNG (`rand::rngs::StdRng`, seeded in tests) and
 their retry state.
@@ -111,24 +111,27 @@ Windows for a day D (local time), each with a base interval:
 
 | Window | When | Base interval |
 |---|---|---|
-| Morning rush | F(D) − 2h … F(D), if D is a school day | 40 min |
-| School | F(D) … L(D) | 150 min |
-| Afternoon | L(D) … 18:00 (or day start … 18:00 on a day off) | 120 min |
-| Evening | 18:00 … 22:00, if D+1 is a school day | 50 min |
-| Evening, day off tomorrow | 18:00 … 22:00 otherwise | 180 min |
-| Night | 22:00 … morning rush (or 08:00 on a day off) | no runs |
+| Morning rush | F(D) − 2h … F(D), if D is a school day | 45 min |
+| School | F(D) … L(D) | 210 min |
+| Afternoon | L(D) … 18:00 | 150 min |
+| Daytime, day off | 09:00 … 18:00 on a day off | 300 min |
+| Evening | 18:00 … 22:00, if D+1 is a school day | 80 min |
+| Evening, day off tomorrow | 18:00 … 22:00 otherwise | 240 min |
+| Night | 22:00 … morning rush (or 09:00 on a day off) | no runs |
 
 If L(D) is after 18:00 the afternoon window is empty and the evening starts
 at L(D). A day off with a school day tomorrow (e.g. Sunday) gets the dense
 evening.
-A plain day off gets roughly 2–3 runs total.
+A plain day off gets roughly 3–5 runs total.
 
 `next_run(now)`: take the window containing `now`, candidate =
 now + base × uniform(0.75, 1.25). If the candidate falls past the window's
 end, the next run is the start of the next window that has runs, plus a
 random 0–15 min offset (so window boundaries never fire at exact times).
-Night is skipped this way. Rough total for a school day: ~3 + 2–3 + 1–2 +
-~5 ≈ 9, i.e. no more than today.
+Night is skipped this way. Each window start always gets a run, so a
+school day is ~3 (rush) + 2 (school) + 1–2 (afternoon) + 3 (evening) ≈ 9–10.
+(Intervals retuned during planning: the first draft's 40/150/120/50 min gave
+~12–13 runs, breaking the ≤ 9 goal; the goal is now "about 9, never above 11".)
 
 Retries: on `Failed`, `backoff_delay(retries)` with ±25 % jitter, at most 2
 per scheduled run and never past the next planned run (same rules as
@@ -136,8 +139,10 @@ today's `librus_next_wait`). `Rejected` (bad credentials) never retries.
 
 ### Staggering
 
-`initial_delay` for kid i = random 1–8 min + i × 5 min, so a restart never
-logs both kids in together. After that each kid has its own RNG, and
+`first_run` for kid i: if the kid's cache is empty, now + random 1–8 min +
+i × 5 min (a restart never logs both kids in together); if cached data
+exists, the next scheduled run, so a restart at 03:00 does not log in at
+03:00. After that each kid has its own RNG, and
 TimetablePolicy keeps a minimum gap: on every `next_run`, if the result is
 within 4 min of another kid's planned run, push it out by 4–8 min. The
 policies share an `Arc<Mutex<Vec<Option<DateTime<Tz>>>>>` of planned runs,
