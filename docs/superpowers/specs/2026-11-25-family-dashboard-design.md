@@ -274,7 +274,9 @@ longitude = 21.01
 `░` = light gray (level 170), `█` = black.
 
 **Mockup:** [`2026-11-25-family-dashboard-mockup.html`](2026-11-25-family-dashboard-mockup.html)
-is the agreed visual reference. It's self-contained and opens straight from disk:
+was the agreed visual reference for the original design. The calendar column has
+since changed (shaded day bands, bold titles, a location line); the rules below and
+the previews in `target/preview/` are current. It's self-contained and opens straight from disk:
 - the 2-bit and 1-bit reference renders from the Takumi test, embedded as images
 - live HTML/CSS mockups of the states before and after `switch_at`, using the same CSS
   as the test template, which makes a good starting point for `templates/family.html`
@@ -282,14 +284,15 @@ is the agreed visual reference. It's self-contained and opens straight from disk
 Inter loads from Google Fonts when online, and a fallback font is used otherwise.
 
 **Tone rule (2-bit palette: 0, 85, 170, 255):**
-- **Light gray (170)** is for structural areas: the header band and each kid's day bar,
-  with black bold text on top.
-- **Black** is for text, rules and alerts. The inverted "zast."/flag tag stays black
-  with white text, so it's the one thing that stands out. Cancelled lessons stay struck
-  through.
-- **Dark gray (85)** is available but unused for now.
+- **Light gray (170)** is for structural areas: the header band, each kid's day bar and
+  the calendar's day bands, with black bold text on top.
+- **Black** is for text, rules and alerts. The inverted "zast."/flag tag and today's
+  calendar band are black with white text, so they stand out. Cancelled lessons stay
+  struck through.
+- **Dark gray (85)** is for secondary text: the calendar's event locations.
 - At 1-bit, light gray turns into white (cutoff 160), so the layout degrades cleanly:
-  the bands disappear and the bold text keeps the hierarchy.
+  light-gray bands disappear and the bold text keeps the hierarchy. Black bands (today,
+  flags) stay, and dark gray turns black.
 
 - **Header:**
   - the date
@@ -302,9 +305,15 @@ Inter loads from Google Fonts when online, and a fallback font is used otherwise
     push its title out of line with the other titles: either widen the time column or
     give all-day events their own style without a time (builder's call, check in the
     preview)
-  - long titles are cut with an ellipsis
-  - roughly 4–5 entries a week are expected, and the column has room for about 12
-  - if events don't fit, the overflow becomes a final "+N więcej" line
+  - each day is a light-gray band, and today's band is black with white text
+  - each event shows its time and a bold title; if it has a `LOCATION`, the first line
+    of it appears below the title in smaller dark-gray text
+  - long titles and locations are cut with an ellipsis
+  - roughly 4–5 entries a week are expected. The column fits about 14 single-line
+    events, fewer with locations; the builder estimates row heights in px from the
+    template's CSS
+  - if events don't fit, the overflow becomes a final "+N więcej" line, and the rows
+    kept leave room for it and for the stale note
 - **One column per kid:**
   - **Featured day:** a light-gray header bar reading "Dziś · 8:00–14:25" (or "Jutro · …" / "pon. · …"), then each
     lesson with its start time and subject.
