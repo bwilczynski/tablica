@@ -21,23 +21,68 @@ const KID_GAP: Duration = Duration::from_secs(4 * 60);
 const KID_PUSH_MIN: Duration = Duration::from_secs(4 * 60);
 const KID_PUSH_MAX: Duration = Duration::from_secs(8 * 60);
 const KID_PUSH_ATTEMPTS: usize = 5;
-/// First run after startup with nothing cached: 1–8 min, plus 5 min per kid.
+/// First run with nothing cached: right away, each further kid 20–40 s later.
+const EMPTY_START_STEP_MIN: Duration = Duration::from_secs(20);
+const EMPTY_START_STEP_MAX: Duration = Duration::from_secs(40);
+/// First run with a stale cache in the daytime: 1–8 min, plus 5 min per kid.
 const COLD_START_MIN: Duration = Duration::from_secs(60);
 const COLD_START_MAX: Duration = Duration::from_secs(8 * 60);
 const COLD_START_PER_KID: Duration = Duration::from_secs(5 * 60);
 
+#[derive(Default)]
+struct Plans {
+    /// Each kid's next planned run.
+    runs: Vec<Option<DateTime<Tz>>>,
+    /// Startup fetch times reserved for kids with nothing cached.
+    startup: Vec<Option<DateTime<Tz>>>,
+}
+
 /// The next planned run of every kid, shared by their policies.
 #[derive(Clone, Default)]
-pub struct PlannedRuns(Arc<Mutex<Vec<Option<DateTime<Tz>>>>>);
+pub struct PlannedRuns(Arc<Mutex<Plans>>);
 
 impl PlannedRuns {
     pub fn new(kids: usize) -> Self {
-        Self(Arc::new(Mutex::new(vec![None; kids])))
+        Self(Arc::new(Mutex::new(Plans {
+            runs: vec![None; kids],
+            startup: vec![None; kids],
+        })))
+    }
+
+    /// Reserves startup fetches for the kids whose cache is `empty`: the first
+    /// right away, each next one 20–40 s after the previous. Call before any
+    /// policy runs, so kids with cached data keep their gap from these.
+    pub fn reserve_startup(&self, now: DateTime<Tz>, empty: &[bool], rng: &mut StdRng) {
+        let mut plans = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = now;
+        for (index, _) in empty.iter().enumerate().filter(|(_, e)| **e) {
+            if index >= plans.runs.len() {
+                break;
+            }
+            plans.runs[index] = Some(next);
+            plans.startup[index] = Some(next);
+            next += between(EMPTY_START_STEP_MIN, EMPTY_START_STEP_MAX, rng);
+        }
+    }
+
+    /// The startup fetch reserved for `index`, once.
+    fn take_startup(&self, index: usize) -> Option<DateTime<Tz>> {
+        let mut plans = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        plans.startup.get_mut(index).and_then(Option::take)
+    }
+
+    /// Records `at` as `index`'s plan as is.
+    fn record(&self, index: usize, at: DateTime<Tz>) {
+        let mut plans = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = plans.runs.get_mut(index) {
+            *slot = Some(at);
+        }
     }
 
     /// Moves `at` away from other kids' runs, then records it as `index`'s plan.
     fn claim(&self, index: usize, mut at: DateTime<Tz>, rng: &mut StdRng) -> DateTime<Tz> {
-        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut plans = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let runs = &mut plans.runs;
         let gap = chrono::Duration::from_std(KID_GAP).unwrap_or_default();
         for _ in 0..KID_PUSH_ATTEMPTS {
             let clash = runs
@@ -121,36 +166,35 @@ impl TimetablePolicy {
         at
     }
 
-    /// Nothing cached, or the cache is stale while it is daytime: refresh soon.
+    /// The cache is stale while it is daytime: refresh soon.
     fn needs_cold_start(&self, now: DateTime<Tz>) -> bool {
-        match self.timetable() {
-            None => true,
-            Some(s) => {
-                is_stale(
-                    s.fetched_at,
-                    now.with_timezone(&chrono::Utc),
-                    TIMETABLE_MAX_AGE,
-                ) && in_window(now, Some(&s.data))
-            }
-        }
+        self.timetable().is_some_and(|s| {
+            is_stale(
+                s.fetched_at,
+                now.with_timezone(&chrono::Utc),
+                TIMETABLE_MAX_AGE,
+            ) && in_window(now, Some(&s.data))
+        })
     }
 }
 
 impl PollPolicy for TimetablePolicy {
     fn first_run(&mut self, now: DateTime<Tz>) -> DateTime<Tz> {
         let has_data = self.timetable().is_some();
+        if !has_data {
+            // Nothing to show yet: fetch at the reserved startup time, or now.
+            let at = self.planned.take_startup(self.index).unwrap_or(now);
+            self.planned.record(self.index, at);
+            self.scheduled = Some(at);
+            return at;
+        }
         let at = if self.needs_cold_start(now) {
             let stagger = COLD_START_PER_KID * u32::try_from(self.index).unwrap_or(u32::MAX);
             now + between(COLD_START_MIN, COLD_START_MAX, &mut self.rng) + stagger
         } else {
             self.scheduled_after(now)
         };
-        // With nothing cached any time will do; otherwise keep out of the night.
-        let at = if has_data {
-            self.place(at)
-        } else {
-            self.planned.claim(self.index, at, &mut self.rng)
-        };
+        let at = self.place(at);
         self.scheduled = Some(at);
         at
     }
@@ -266,17 +310,79 @@ mod tests {
         )
     }
 
+    fn secs(n: i64) -> chrono::Duration {
+        chrono::Duration::seconds(n)
+    }
+
     #[test]
-    fn empty_cache_first_run_is_staggered_by_kid() {
+    fn startup_reservations_space_empty_kids_and_start_immediately() {
+        for seed in 0..200 {
+            let now = local(12, 0);
+            let planned = PlannedRuns::new(3);
+            planned.reserve_startup(now, &[true, true, true], &mut StdRng::seed_from_u64(seed));
+            let t: Vec<_> = (0..3).map(|i| planned.take_startup(i).unwrap()).collect();
+            assert_eq!(t[0], now);
+            for pair in t.windows(2) {
+                let gap = pair[1] - pair[0];
+                assert!(gap >= secs(20) && gap < secs(40), "seed {seed}: {t:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn startup_offsets_count_only_empty_kids() {
+        let now = local(12, 0);
+        let planned = PlannedRuns::new(2);
+        planned.reserve_startup(now, &[false, true], &mut StdRng::seed_from_u64(1));
+        assert_eq!(planned.take_startup(1), Some(now));
+        assert_eq!(planned.take_startup(0), None);
+    }
+
+    #[test]
+    fn empty_kid_takes_its_startup_reservation() {
         let dir = tempfile::tempdir().unwrap();
         let caches = caches(&dir, false);
-        for seed in 0..50 {
-            let now = local(12, 0);
-            let k0 = policy(0, &caches, &PlannedRuns::new(2), seed).first_run(now);
-            let k1 = policy(1, &caches, &PlannedRuns::new(2), seed).first_run(now);
-            assert!(k0 >= now + MIN && k0 < now + 8 * MIN, "{k0}");
-            assert!(k1 >= now + 6 * MIN && k1 < now + 13 * MIN, "{k1}");
+        let now = local(12, 0);
+        let planned = PlannedRuns::new(2);
+        planned.reserve_startup(now, &[true, true], &mut StdRng::seed_from_u64(1));
+        let reserved = planned.0.lock().unwrap().startup[1].unwrap();
+        assert_eq!(policy(1, &caches, &planned, 7).first_run(now), reserved);
+    }
+
+    #[test]
+    fn cached_kid_keeps_gap_from_reserved_startup_in_either_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let caches = stale_caches(&dir);
+        let now = local(9, 0);
+        for seed in 0..100 {
+            for cached_first in [true, false] {
+                let planned = PlannedRuns::new(2);
+                planned.reserve_startup(now, &[false, true], &mut StdRng::seed_from_u64(seed));
+                let (stale, empty) = if cached_first {
+                    let stale = policy(0, &caches, &planned, seed).first_run(now);
+                    (stale, policy(1, &caches, &planned, seed).first_run(now))
+                } else {
+                    let empty = policy(1, &caches, &planned, seed).first_run(now);
+                    (policy(0, &caches, &planned, seed).first_run(now), empty)
+                };
+                assert_eq!(empty, now);
+                assert!(
+                    stale - empty >= secs(240),
+                    "seed {seed}: {stale} vs {empty}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn empty_cache_fetches_at_startup_even_at_night() {
+        let dir = tempfile::tempdir().unwrap();
+        let caches = caches(&dir, false);
+        let now = local(3, 0);
+        assert_eq!(
+            policy(0, &caches, &PlannedRuns::new(2), 1).first_run(now),
+            now
+        );
     }
 
     #[test]

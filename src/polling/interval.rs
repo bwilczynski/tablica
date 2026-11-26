@@ -7,10 +7,8 @@ use chrono_tz::Tz;
 use rand::rngs::StdRng;
 
 use super::backoff::backoff_delay;
-use super::jitter::{between, jittered};
+use super::jitter::jittered;
 use super::{Outcome, PollPolicy};
-
-const FIRST_RUN_WITHIN: Duration = Duration::from_secs(2 * 60);
 
 /// Runs every `period` (jittered by `spread`); after failures, backs off from
 /// 5 min but never waits longer than the period. Rejections are not retried early.
@@ -33,8 +31,9 @@ impl IntervalPolicy {
 }
 
 impl PollPolicy for IntervalPolicy {
+    /// Right away: there is nothing to show until the first fetch.
     fn first_run(&mut self, now: DateTime<Tz>) -> DateTime<Tz> {
-        now + between(Duration::ZERO, FIRST_RUN_WITHIN, &mut self.rng)
+        now
     }
 
     fn next_run(&mut self, now: DateTime<Tz>, outcome: Outcome) -> DateTime<Tz> {
@@ -75,12 +74,9 @@ mod tests {
     }
 
     #[test]
-    fn first_run_within_two_minutes() {
-        for seed in 0..50 {
-            let mut p = IntervalPolicy::new(15 * MIN, 0.2, StdRng::seed_from_u64(seed));
-            let d = gap(now(), p.first_run(now()));
-            assert!(d < 2 * MIN, "{d:?}");
-        }
+    fn first_run_is_immediate() {
+        let mut p = IntervalPolicy::new(15 * MIN, 0.2, StdRng::seed_from_u64(1));
+        assert_eq!(p.first_run(now()), now());
     }
 
     #[test]

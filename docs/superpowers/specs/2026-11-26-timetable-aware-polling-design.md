@@ -148,15 +148,25 @@ night, e.g. after the timer woke late, is postponed to the next window.
 
 ### Staggering
 
-`first_run` for kid i: if the kid's cache is empty, now + random 1–8 min +
-i × 5 min (a restart never logs both kids in together); if cached data
-exists, the next scheduled run, so a restart at 03:00 does not log in at
-03:00. After that each kid has its own RNG, and
+`first_run` for kid i:
+- cache empty (e.g. a fresh container): fetch at startup, at any hour. The
+  kids with nothing cached go in config order, the first right away and each
+  next one 20–40 s after the previous (a one-off exception to the 4-min kid
+  gap: the dashboard has nothing to show until then). These times are
+  reserved before any poller starts, so kids with cached data keep their
+  4-min gap from them.
+- cache stale (older than 26 h) during the day: now + random 1–8 min +
+  i × 5 min.
+- otherwise: the next scheduled run, so a restart at 03:00 does not log in
+  at 03:00.
+
+After that each kid has its own RNG, and
 TimetablePolicy keeps a minimum gap: on every `next_run`, if the result is
 within 4 min of another kid's planned run, push it out by 4–8 min. The
 policies share an `Arc<Mutex<Vec<Option<DateTime<Tz>>>>>` of planned runs,
-created in `spawn_family_pollers`. Calendar/weather start after a random
-0–2 min.
+created in `spawn_family_pollers`. Calendar/weather fetch right away at
+startup (changed after release: the 0–2 min start jitter left the dashboard
+showing "unavailable" on a fresh container).
 
 ### Testing
 
