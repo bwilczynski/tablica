@@ -96,7 +96,8 @@ async fn capture_kid(kid: &KidConfig, dir: &Path, urls: &LibrusUrls) -> anyhow::
                 pages.push(("timetable-next.html", html));
             }
             Err(e) => {
-                failure = Some(anyhow::Error::new(e).context(format!("fetching week {week}")));
+                // The week value comes from the page, so the context is fixed text.
+                failure = Some(anyhow::Error::new(e).context("fetching the next week"));
             }
         },
         None => eprintln!(
@@ -935,7 +936,9 @@ mod tests {
             .await;
         h.mount_tail(ResponseTemplate::new(302).insert_header("Location", "/rodzic/index"))
             .await;
-        let week = include_str!("../../../tests/fixtures/librus/handmade/week.html");
+        // The next week's option value is page content: it never reaches the error.
+        let week = include_str!("../../../tests/fixtures/librus/handmade/week.html")
+            .replace("2026-11-30_2026-12-06", "PAGEMARKER");
         Mock::given(method("GET"))
             .and(path("/przegladaj_plan_lekcji"))
             .respond_with(ResponseTemplate::new(200).set_body_string(week))
@@ -951,7 +954,13 @@ mod tests {
         let err = capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("fetching week"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("fetching the next week"),
+            "{err:#}"
+        );
+        for text in [err.to_string(), format!("{err:#}"), format!("{err:?}")] {
+            assert!(!text.contains("PAGEMARKER"), "{text}");
+        }
         let current =
             std::fs::read_to_string(out.path().join("kid1/timetable-current.html")).unwrap();
         assert!(!current.contains("Jan Testowy") && !current.contains("Ewa Probna"));

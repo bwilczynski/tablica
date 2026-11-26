@@ -21,6 +21,9 @@ use tracing::warn;
 
 use super::SourceError;
 
+/// The parser's own diagnostic quotes the failing input line, so it is dropped.
+const INVALID_ICS: SourceError = SourceError::Parse("calendar is not valid iCalendar");
+
 /// Safety cap on occurrences examined per recurring event.
 const MAX_OCCURRENCES: usize = 20_000;
 
@@ -92,9 +95,9 @@ pub fn validate(ics: &str) -> Result<(), SourceError> {
     let last = lines.next_back().unwrap_or_default();
     if !first.eq_ignore_ascii_case("BEGIN:VCALENDAR") || !last.eq_ignore_ascii_case("END:VCALENDAR")
     {
-        return Err(SourceError::Parse("not a VCALENDAR".into()));
+        return Err(SourceError::Parse("not a VCALENDAR"));
     }
-    parser::read_calendar(&unfolded).map_err(SourceError::Parse)?;
+    parser::read_calendar(&unfolded).map_err(|_| INVALID_ICS)?;
     Ok(())
 }
 
@@ -136,7 +139,7 @@ pub fn events_in(
     to: NaiveDate,
 ) -> Result<Vec<CalendarEvent>, SourceError> {
     let unfolded = parser::unfold(ics);
-    let cal = parser::read_calendar(&unfolded).map_err(SourceError::Parse)?;
+    let cal = parser::read_calendar(&unfolded).map_err(|_| INVALID_ICS)?;
 
     let raws: Vec<RawEvent> = cal
         .components
@@ -253,8 +256,9 @@ fn occurrences(raw: &RawEvent, tz: Tz, win: &Window) -> Vec<Moment> {
     };
     let set = match RRuleSet::from_str(&format!("{dtstart_line}\nRRULE:{rule}")) {
         Ok(s) => s,
-        Err(e) => {
-            warn!(uid = %raw.uid, error = %e, "skipping event with unusable RRULE");
+        Err(_) => {
+            // Feed text (UID, the rrule error quoting the value) stays out of logs.
+            warn!(source = "calendar", "skipping event with unusable RRULE");
             return Vec::new();
         }
     };
@@ -392,7 +396,10 @@ fn parse_moment(value: &str, tzid: Option<&str>, local: Tz) -> Option<Moment> {
     let zone = match tzid {
         None => local,
         Some(id) => id.parse::<Tz>().unwrap_or_else(|_| {
-            warn!(tzid = id, "unknown TZID, using the configured time zone");
+            warn!(
+                source = "calendar",
+                "unknown TZID, using the configured time zone"
+            );
             local
         }),
     };
@@ -495,6 +502,29 @@ fn raw_event(c: &Component<'_>, local: Tz) -> Option<RawEvent> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feed_text_never_reaches_logs_or_errors() {
+        use crate::sources::test_logs::Logs;
+        let (logs, _guard) = Logs::capture();
+        let tz = chrono_tz::Europe::Warsaw;
+        let day = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:SECRETSENTINEL-uid\n\
+                   DTSTART;TZID=SECRETSENTINEL/Zone:20261125T100000\n\
+                   RRULE:FREQ=SECRETSENTINEL\nSUMMARY:SECRETSENTINEL\nEND:VEVENT\n\
+                   END:VCALENDAR\n";
+        let events = events_in(ics, tz, day, day).unwrap();
+        let broken = "BEGIN:VCALENDAR\nEND:SECRETSENTINEL\nEND:VCALENDAR\n";
+        let err = events_in(broken, tz, day, day).unwrap_err();
+        let seen = format!("{err} {err:?} {events:?} {}", logs.text());
+        assert!(logs.text().contains("unusable RRULE"), "{}", logs.text());
+        assert!(!seen.contains("SECRETSENTINEL-uid"), "{seen}");
+        assert!(!logs.text().contains("SECRETSENTINEL"), "{}", logs.text());
+        assert!(
+            !format!("{err} {err:?}").contains("SECRETSENTINEL"),
+            "{err}"
+        );
+    }
+
     use super::*;
     use chrono::Timelike;
     use wiremock::matchers::{header, method};
