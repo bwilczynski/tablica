@@ -7,7 +7,7 @@ use anyhow::Context;
 
 use super::auth::{Exchange, LibrusClient, LibrusUrls};
 use super::timetable::{teacher_names, week_options};
-use crate::family::config::{FamilyConfig, KidConfig};
+use crate::family::config::KidConfig;
 
 const REDACTED: &str = "<redacted>";
 /// Cookie values shorter than this are only redacted in `Set-Cookie` headers, not
@@ -15,8 +15,8 @@ const REDACTED: &str = "<redacted>";
 const MIN_COOKIE_SCRUB_LEN: usize = 8;
 
 /// Captures fixtures from production Librus for every configured kid.
-pub async fn capture(family: &FamilyConfig, out: &Path) -> anyhow::Result<()> {
-    capture_with_urls(family, out, &LibrusUrls::default()).await
+pub async fn capture(kids: &[KidConfig], out: &Path) -> anyhow::Result<()> {
+    capture_with_urls(kids, out, &LibrusUrls::default()).await
 }
 
 /// Like [`capture`], against the given hosts.
@@ -26,15 +26,12 @@ pub async fn capture(family: &FamilyConfig, out: &Path) -> anyhow::Result<()> {
 /// with `LOGIN`, cookie values with `<redacted>`, and the password (never sent back
 /// by Librus, but checked anyway) with `<redacted>`.
 pub async fn capture_with_urls(
-    family: &FamilyConfig,
+    kids: &[KidConfig],
     out: &Path,
     urls: &LibrusUrls,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !family.kids.is_empty(),
-        "no [[family.kid]] entries in the config"
-    );
-    for (i, kid) in family.kids.iter().enumerate() {
+    anyhow::ensure!(!kids.is_empty(), "no [[family.kid]] entries in the config");
+    for (i, kid) in kids.iter().enumerate() {
         let n = i + 1;
         let dir = out.join(format!("kid{n}"));
         capture_kid(kid, &dir, urls)
@@ -675,29 +672,18 @@ mod tests {
     }
 
     use super::*;
-    use crate::family::config::WeatherConfig;
     use crate::sources::librus::auth::tests::{Hosts, LOGIN, PASSWORD};
-    use chrono::NaiveTime;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, Request, ResponseTemplate};
 
     const COOKIE_VALUE: &str = "s3ss10n-c00kie-v4lue";
 
-    fn config() -> FamilyConfig {
-        FamilyConfig {
-            switch_at: NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
-            calendar_days: 7,
-            ics_url: "http://x/cal.ics".into(),
-            kids: vec![KidConfig {
-                label: "Kid 1".into(),
-                librus_login: LOGIN.into(),
-                librus_password: PASSWORD.into(),
-            }],
-            weather: WeatherConfig {
-                latitude: 0.0,
-                longitude: 0.0,
-            },
-        }
+    fn kids() -> Vec<KidConfig> {
+        vec![KidConfig {
+            label: "Kid 1".into(),
+            librus_login: LOGIN.into(),
+            librus_password: PASSWORD.into(),
+        }]
     }
 
     fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -763,7 +749,7 @@ mod tests {
             .await;
 
         let out = tempfile::tempdir().unwrap();
-        capture_with_urls(&config(), out.path(), &h.urls())
+        capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap();
 
@@ -847,7 +833,7 @@ mod tests {
             .await;
 
         let out = tempfile::tempdir().unwrap();
-        capture_with_urls(&config(), out.path(), &h.urls())
+        capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap();
         let files = files_under(out.path());
@@ -868,7 +854,7 @@ mod tests {
         h.mount_entry().await;
         h.mount_post_redirect("http://evil.example/x").await;
         let out = tempfile::tempdir().unwrap();
-        let err = capture_with_urls(&config(), out.path(), &h.urls())
+        let err = capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap_err();
         assert!(
@@ -915,7 +901,7 @@ mod tests {
             .await;
 
         let out = tempfile::tempdir().unwrap();
-        capture_with_urls(&config(), out.path(), &h.urls())
+        capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap();
         let kid = out.path().join("kid1");
@@ -962,7 +948,7 @@ mod tests {
             .await;
 
         let out = tempfile::tempdir().unwrap();
-        let err = capture_with_urls(&config(), out.path(), &h.urls())
+        let err = capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("fetching week"), "{err:#}");
@@ -990,7 +976,7 @@ mod tests {
             .mount(&h.synergia)
             .await;
         let out = tempfile::tempdir().unwrap();
-        capture_with_urls(&config(), out.path(), &h.urls())
+        capture_with_urls(&kids(), out.path(), &h.urls())
             .await
             .unwrap();
         let cur = std::fs::read_to_string(out.path().join("kid1/timetable-current.html")).unwrap();
@@ -1008,5 +994,95 @@ mod tests {
             cur.contains("Nauczyciel 2 s. 3") || cur.contains("Nauczyciel 2&nbsp&nbsp;s."),
             "{cur}"
         );
+    }
+}
+
+/// `tablica capture librus` loads the full config, then takes family's kids.
+#[cfg(test)]
+mod load_tests {
+    use std::fs;
+
+    use crate::config::{ConfigError, Loaded, load};
+    use crate::family::dashboard::family_kids;
+
+    const FAMILY: &str = r#"
+timezone = "Europe/Warsaw"
+base_url = "http://x"
+
+[family]
+switch_at = "16:00"
+calendar_days = 7
+
+[family.calendar]
+ics_url_secret = "icloud_ics_url"
+
+[[family.kid]]
+label = "Kid 1"
+librus_login_secret = "librus_kid1_login"
+librus_password_secret = "librus_kid1_password"
+
+[family.weather]
+latitude = 1.0
+longitude = 2.0
+"#;
+
+    const OFFICE: &str = r#"
+[[device]]
+name = "office"
+mac = "AA:BB:CC:DD:EE:02"
+api_key_secret = "trmnl_office_key"
+dashboard = "homelab"
+"#;
+
+    fn load_toml(toml: &str) -> Result<Loaded, ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, value) in [
+            ("trmnl_office_key", "office-key"),
+            ("icloud_ics_url", "https://example.com/cal.ics"),
+            ("librus_kid1_login", "kid1"),
+            ("librus_kid1_password", "pw1"),
+        ] {
+            fs::write(dir.path().join(name), value).unwrap();
+        }
+        let path = dir.path().join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let entries = [
+            crate::family::dashboard::entry(),
+            crate::dashboards::homelab::entry(),
+        ];
+        load(&path, dir.path(), &entries)
+    }
+
+    #[test]
+    fn capture_rejects_invalid_unrelated_device() {
+        let toml = format!(
+            "{FAMILY}{}",
+            OFFICE.replace("AA:BB:CC:DD:EE:02", "not-a-mac")
+        );
+        let err = load_toml(&toml).err().expect("bad MAC accepted");
+        assert!(matches!(err, ConfigError::InvalidMac { .. }), "{err}");
+    }
+
+    #[test]
+    fn capture_accepts_zero_devices_with_kids() {
+        let kids = family_kids(load_toml(FAMILY).unwrap()).unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].librus_login, "kid1");
+    }
+
+    #[test]
+    fn capture_reads_each_secret_once() {
+        let loaded = load_toml(&format!("{FAMILY}{OFFICE}")).unwrap();
+        // The office key, the calendar URL, and the kid's login and password.
+        assert_eq!(loaded.secrets.reads(), 4);
+        let kids = family_kids(loaded).unwrap();
+        assert_eq!(kids[0].librus_password, "pw1");
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_zero_kids() {
+        let out = tempfile::tempdir().unwrap();
+        let err = super::capture(&[], out.path()).await.unwrap_err();
+        assert!(err.to_string().contains("[[family.kid]]"), "{err}");
     }
 }

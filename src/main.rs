@@ -1,18 +1,15 @@
-use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tablica::config::Loaded;
-use tablica::dashboard::{Active, DashboardEntry, PrepareContext};
-use tablica::device_api::{self, AppState, ImageStore};
-use tablica::family::dashboard::ParsedFamily;
-use tablica::render::{Renderer, TemplateSource};
+use tablica::dashboard::DashboardEntry;
+use tablica::family::dashboard::family_kids;
+use tablica::render::TemplateSource;
+use tablica::server::ServeOptions;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 /// How long shutdown waits for the fetch loops to stop.
@@ -83,21 +80,6 @@ fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<Loaded> {
         .with_context(|| format!("loading {}", config.display()))
 }
 
-/// Takes the family dashboard's parsed section out of the loaded config.
-// Interim: Task 6 types capture.
-fn parsed_family(loaded: Loaded) -> anyhow::Result<ParsedFamily> {
-    let family = loaded
-        .dashboards
-        .into_iter()
-        .find(|d| d.name == "family")
-        .context("family dashboard is not active")?;
-    let parsed: Box<dyn Any> = family.parsed;
-    let parsed = parsed
-        .downcast::<ParsedFamily>()
-        .map_err(|_| anyhow!("family entry did not parse to ParsedFamily"))?;
-    Ok(*parsed)
-}
-
 /// Installs SIGTERM and SIGINT handlers; the returned future resolves on the first.
 fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
     let mut term = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
@@ -110,70 +92,6 @@ fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
     })
 }
 
-async fn serve(loaded: Loaded, templates: Option<PathBuf>) -> anyhow::Result<()> {
-    let cfg = Arc::new(loaded.config);
-    let ctx = PrepareContext {
-        timezone: cfg.timezone,
-        data_dir: &cfg.data_dir,
-    };
-    let mut dashboards = Active::new();
-    for parsed in loaded.dashboards {
-        let dashboard = parsed
-            .parsed
-            .prepare(&ctx)
-            .with_context(|| format!("preparing the {} dashboard", parsed.name))?;
-        dashboards.insert(parsed.name, dashboard);
-    }
-    let source = match templates {
-        Some(dir) => TemplateSource::Dir(dir),
-        None => TemplateSource::Embedded,
-    };
-    let renderer = Arc::new(Renderer::new(source, &dashboards).context("building the renderer")?);
-
-    // Bind first: a bind failure under a restart loop must never trigger Librus logins.
-    let listener = tokio::net::TcpListener::bind(cfg.listen)
-        .await
-        .with_context(|| format!("binding {}", cfg.listen))?;
-    let stop = CancellationToken::new();
-    let fetchers: Vec<_> = dashboards
-        .values()
-        .flat_map(|d| d.clone().spawn_pollers(stop.clone()))
-        .collect();
-
-    let app = device_api::router(AppState {
-        cfg: cfg.clone(),
-        dashboards: Arc::new(dashboards),
-        renderer,
-        images: Arc::new(ImageStore::new()),
-        clock: Arc::new(chrono::Utc::now),
-    });
-    let names: Vec<&str> = cfg.devices.iter().map(|d| d.name.as_str()).collect();
-    info!(devices = %names.join(", "), "listening on {}", cfg.listen);
-
-    let shutdown = shutdown_signal()?;
-    let stop_fetchers = stop.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            stop_fetchers.cancel();
-        })
-        .await
-        .context("serving")?;
-
-    stop.cancel();
-    let stopped = tokio::time::timeout(FETCHER_STOP_TIMEOUT, async {
-        for handle in fetchers {
-            let _ = handle.await;
-        }
-    })
-    .await;
-    if stopped.is_err() {
-        warn!("fetchers did not stop in time");
-    }
-    info!("stopped");
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_logging();
@@ -183,7 +101,17 @@ async fn main() -> anyhow::Result<()> {
             secrets_dir,
             templates,
         } => {
-            serve(load(&config, &secrets_dir)?, templates).await?;
+            let loaded = load(&config, &secrets_dir)?;
+            let shutdown = shutdown_signal()?;
+            let templates = match templates {
+                Some(dir) => TemplateSource::Dir(dir),
+                None => TemplateSource::Embedded,
+            };
+            let opts = ServeOptions {
+                templates,
+                stop_timeout: FETCHER_STOP_TIMEOUT,
+            };
+            tablica::server::run(loaded, opts, shutdown).await?;
         }
         Command::Capture {
             source:
@@ -193,8 +121,8 @@ async fn main() -> anyhow::Result<()> {
                     out,
                 },
         } => {
-            let family = parsed_family(load(&config, &secrets_dir)?)?;
-            tablica::sources::librus::capture(&family.cfg, &out).await?;
+            let kids = family_kids(load(&config, &secrets_dir)?)?;
+            tablica::sources::librus::capture(&kids, &out).await?;
         }
     }
     Ok(())
