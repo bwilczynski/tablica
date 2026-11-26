@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "changelog-sections": [
+    { "type": "feat", "section": "Added" },
+    { "type": "fix", "section": "Fixed" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "hidden": true }, { "type": "chore", "hidden": true },
+    { "type": "docs", "hidden": true }, { "type": "test", "hidden": true },
+    { "type": "ci", "hidden": true }, { "type": "build", "hidden": true },
+    { "type": "style", "hidden": true }
+  ],
+  "packages": { ".": { "release-type": "rust", "package-name": "tablica", "changelog-path": "CHANGELOG.md" } }
+}

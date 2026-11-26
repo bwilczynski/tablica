@@ -12,7 +12,7 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  # release-plz builds the changelog and the next version from commit messages.
+  # release-please builds the changelog and the next version from commit messages.
   conventional-commits:
     runs-on: ubuntu-latest
     steps:

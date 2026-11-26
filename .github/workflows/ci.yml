@@ -1,6 +1,6 @@
 name: CI
 
-# Called by pr-validation.yml on pull requests and by release-plz.yml on pushes to main.
+# Called by pr-validation.yml on pull requests and by release.yml on pushes to main.
 on:
   workflow_call:
 
