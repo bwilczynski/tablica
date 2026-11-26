@@ -6,5 +6,6 @@ pub mod device_api;
 pub mod family;
 pub mod polling;
 pub mod render;
+pub mod server;
 pub mod sources;
 pub mod text;

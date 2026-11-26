@@ -1,5 +1,6 @@
 //! The family dashboard's plug-in entry.
 
+use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,12 +12,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::{SourceCache, source_health};
-use crate::config::Secrets;
+use crate::config::{Loaded, Secrets};
 use crate::dashboard::{
     Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
 };
 use crate::dashboards::family::{self, FamilyInputs};
-use crate::family::config::{FamilyConfig, parse_config};
+use crate::family::config::{FamilyConfig, KidConfig, parse_config};
 use crate::family::polling::{
     CALENDAR_EVERY, INTERVAL_SPREAD, PlannedRuns, TimetablePolicy, WEATHER_EVERY, fresh_rng,
     to_outcome,
@@ -224,6 +225,21 @@ pub fn entry() -> DashboardEntry {
         name: "family",
         parse,
     }
+}
+
+/// The kids from the family section as `load` parsed it, for `capture librus`:
+/// no second parse, no secret read twice, no caches opened.
+pub fn family_kids(loaded: Loaded) -> anyhow::Result<Vec<KidConfig>> {
+    let family = loaded
+        .dashboards
+        .into_iter()
+        .find(|d| d.name == "family")
+        .context("family dashboard is not active")?;
+    let parsed: Box<dyn Any> = family.parsed;
+    let parsed = parsed
+        .downcast::<ParsedFamily>()
+        .map_err(|_| anyhow::anyhow!("family entry did not parse to ParsedFamily"))?;
+    Ok(parsed.cfg.kids)
 }
 
 fn parse(section: Option<&toml::Value>, secrets: &Secrets) -> ParseResult {
