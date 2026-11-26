@@ -1,9 +1,33 @@
 //! The family dashboard's plug-in entry.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Context;
+use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
+use serde_json::json;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::cache::{SourceCache, source_health};
 use crate::config::Secrets;
-use crate::dashboard::{DashboardEntry, ParseResult, ParsedDashboard};
+use crate::dashboard::{
+    Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
+};
+use crate::dashboards::family::{self, FamilyInputs};
 use crate::family::config::{FamilyConfig, parse_config};
+use crate::family::polling::{
+    CALENDAR_EVERY, INTERVAL_SPREAD, PlannedRuns, TimetablePolicy, WEATHER_EVERY, fresh_rng,
+    to_outcome,
+};
+use crate::family::refresh::{refresh_calendar_once, refresh_timetable_once, refresh_weather_once};
+use crate::family::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
+use crate::polling::{IntervalPolicy, run_poller};
 use crate::sources::librus::LibrusUrls;
+
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const OPEN_METEO: &str = "https://api.open-meteo.com";
 
@@ -13,7 +37,177 @@ pub struct ParsedFamily {
     pub endpoints: Endpoints,
 }
 
-impl ParsedDashboard for ParsedFamily {}
+impl ParsedFamily {
+    /// Opens the caches and builds the http client. No network traffic.
+    pub fn into_dashboard(self, ctx: &PrepareContext) -> anyhow::Result<FamilyDashboard> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .context("building the http client")?;
+        let caches = Arc::new(FamilyCaches::open(ctx.data_dir, self.cfg.kids.len()));
+        Ok(FamilyDashboard {
+            cfg: self.cfg,
+            tz: ctx.timezone,
+            caches,
+            http,
+            endpoints: self.endpoints,
+        })
+    }
+}
+
+impl ParsedDashboard for ParsedFamily {
+    fn prepare(self: Box<Self>, ctx: &PrepareContext) -> anyhow::Result<Arc<dyn Dashboard>> {
+        Ok(Arc::new((*self).into_dashboard(ctx)?))
+    }
+}
+
+/// The family dashboard: calendar, weather and per-kid timetables.
+pub struct FamilyDashboard {
+    pub cfg: FamilyConfig,
+    pub tz: Tz,
+    pub caches: Arc<FamilyCaches>,
+    pub http: reqwest::Client,
+    pub endpoints: Endpoints,
+}
+
+impl Dashboard for FamilyDashboard {
+    fn load_templates(&self, env: &mut minijinja::Environment<'static>) {
+        minijinja_embed::load_templates!(*env);
+    }
+
+    /// Starts the calendar poller, the weather poller and one Librus poller per
+    /// kid. They run until `shutdown` is cancelled.
+    fn spawn_pollers(self: Arc<Self>, shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+        let tz = self.tz;
+        let mut handles = Vec::new();
+
+        {
+            let this = self.clone();
+            let policy = IntervalPolicy::new(CALENDAR_EVERY, INTERVAL_SPREAD, fresh_rng());
+            handles.push(tokio::spawn(run_poller(
+                "calendar".into(),
+                tz,
+                policy,
+                shutdown.clone(),
+                move || {
+                    let this = this.clone();
+                    async move {
+                        let r = refresh_calendar_once(
+                            &this.http,
+                            &this.cfg.ics_url,
+                            &this.caches.calendar,
+                            Utc::now(),
+                        )
+                        .await;
+                        to_outcome(&r)
+                    }
+                },
+            )));
+        }
+
+        {
+            let this = self.clone();
+            let policy = IntervalPolicy::new(WEATHER_EVERY, INTERVAL_SPREAD, fresh_rng());
+            handles.push(tokio::spawn(run_poller(
+                "weather".into(),
+                tz,
+                policy,
+                shutdown.clone(),
+                move || {
+                    let this = this.clone();
+                    async move {
+                        let r = refresh_weather_once(
+                            &this.http,
+                            &this.endpoints.weather_base,
+                            &this.cfg.weather,
+                            tz,
+                            &this.caches.weather,
+                            Utc::now(),
+                        )
+                        .await;
+                        to_outcome(&r)
+                    }
+                },
+            )));
+        }
+
+        let planned = PlannedRuns::new(self.cfg.kids.len());
+        // Kids with nothing cached fetch at startup; reserve those times before any
+        // poller starts so kids with cached data keep their gap from them.
+        let empty: Vec<bool> = self
+            .caches
+            .timetables
+            .iter()
+            .map(|c| c.get().is_none())
+            .collect();
+        planned.reserve_startup(Utc::now().with_timezone(&tz), &empty, &mut fresh_rng());
+        for (index, kid) in self.cfg.kids.iter().enumerate() {
+            let policy =
+                TimetablePolicy::new(index, self.caches.clone(), planned.clone(), fresh_rng());
+            let this = self.clone();
+            handles.push(tokio::spawn(run_poller(
+                format!("timetable ({})", kid.label),
+                tz,
+                policy,
+                shutdown.clone(),
+                move || {
+                    let this = this.clone();
+                    async move {
+                        let r = refresh_timetable_once(
+                            &this.endpoints.librus,
+                            &this.cfg.kids[index],
+                            &this.caches.timetables[index],
+                            Utc::now(),
+                        )
+                        .await;
+                        to_outcome(&r)
+                    }
+                },
+            )));
+        }
+        handles
+    }
+
+    fn view(&self, now: DateTime<Tz>) -> anyhow::Result<View> {
+        let calendar = self.caches.calendar.get();
+        let weather = self.caches.weather.get();
+        let timetables: Vec<_> = self
+            .caches
+            .timetables
+            .iter()
+            .map(SourceCache::get)
+            .collect();
+        let view = family::build(&FamilyInputs {
+            now,
+            cfg: &self.cfg,
+            calendar: calendar.as_ref(),
+            weather: weather.as_ref(),
+            timetables: timetables.iter().map(Option::as_ref).collect(),
+        });
+        Ok(View {
+            template: "family.html",
+            context: minijinja::Value::from_serialize(&view),
+        })
+    }
+
+    fn switch_at(&self) -> Option<NaiveTime> {
+        Some(self.cfg.switch_at)
+    }
+
+    fn health(&self, now: DateTime<Utc>) -> serde_json::Value {
+        let caches = &self.caches;
+        json!({
+            "calendar": source_health(&caches.calendar, now, CALENDAR_MAX_AGE),
+            "weather": source_health(&caches.weather, now, WEATHER_MAX_AGE),
+            "timetables": caches
+                .timetables
+                .iter()
+                .map(|c| source_health(c, now, TIMETABLE_MAX_AGE))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
 
 /// External endpoints; tests point them at mock servers.
 #[derive(Debug, Clone)]
@@ -43,4 +237,107 @@ fn parse(section: Option<&toml::Value>, secrets: &Secrets) -> ParseResult {
         cfg: parse_config(section, secrets)?,
         endpoints: Endpoints::default(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dashboards::test_support::{config, sample_inputs, warsaw};
+    use wiremock::MockServer;
+
+    fn dashboard_in(dir: &tempfile::TempDir, seeded: bool) -> FamilyDashboard {
+        let now = warsaw(2026, 11, 25, 7, 0);
+        let sample = sample_inputs(now);
+        let ctx = PrepareContext {
+            timezone: chrono_tz::Europe::Warsaw,
+            data_dir: dir.path(),
+        };
+        let family = ParsedFamily {
+            cfg: sample.cfg.clone(),
+            endpoints: Endpoints::default(),
+        }
+        .into_dashboard(&ctx)
+        .unwrap();
+        if seeded {
+            let caches = &family.caches;
+            if let Some(c) = sample.calendar {
+                caches.calendar.put(c.data, c.fetched_at).unwrap();
+            }
+            if let Some(w) = sample.weather {
+                caches.weather.put(w.data, w.fetched_at).unwrap();
+            }
+            for (cache, tt) in caches.timetables.iter().zip(sample.timetables) {
+                if let Some(tt) = tt {
+                    cache.put(tt.data, tt.fetched_at).unwrap();
+                }
+            }
+        }
+        family
+    }
+
+    #[test]
+    fn family_view_matches_direct_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dashboard_in(&dir, true);
+        let now = warsaw(2026, 11, 25, 7, 0);
+        let sample = sample_inputs(now);
+        let view = family.view(now).unwrap();
+        assert_eq!(view.template, "family.html");
+        assert_eq!(
+            view.context,
+            minijinja::Value::from_serialize(family::build(&sample.inputs(now)))
+        );
+        assert_eq!(family.switch_at(), Some(sample.cfg.switch_at));
+    }
+
+    #[test]
+    fn family_health_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dashboard_in(&dir, true);
+        let health = family.health(warsaw(2026, 11, 25, 7, 0).with_timezone(&Utc));
+        let timetables = health["timetables"].as_array().unwrap();
+        assert_eq!(timetables.len(), family.cfg.kids.len());
+        for entry in [&health["calendar"], &health["weather"], &timetables[0]] {
+            for key in ["fetched_at", "stale", "last_error"] {
+                assert!(entry.get(key).is_some(), "{key} missing in {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn healthz_on_empty_caches_reports_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dashboard_in(&dir, false);
+        let health = family.health(warsaw(2026, 11, 25, 7, 0).with_timezone(&Utc));
+        let mut sources = vec![health["calendar"].clone(), health["weather"].clone()];
+        sources.extend(health["timetables"].as_array().unwrap().iter().cloned());
+        assert_eq!(sources.len(), 2 + family.cfg.kids.len());
+        for s in sources {
+            assert_eq!(s["stale"], true);
+            assert!(s["fetched_at"].is_null());
+            assert!(s["last_error"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_does_not_touch_the_network() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = PrepareContext {
+            timezone: chrono_tz::Europe::Warsaw,
+            data_dir: dir.path(),
+        };
+        let mut cfg = config(2);
+        cfg.ics_url = server.uri();
+        let parsed = ParsedFamily {
+            cfg,
+            endpoints: Endpoints {
+                weather_base: server.uri(),
+                librus: LibrusUrls::default(),
+            },
+        };
+        let dashboard = Box::new(parsed).prepare(&ctx).unwrap();
+        drop(dashboard);
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 }

@@ -28,7 +28,10 @@ pub struct DashboardEntry {
 }
 
 /// A dashboard's parsed config. `Any` so the binary can recover the typed value.
-pub trait ParsedDashboard: Any + Send {}
+pub trait ParsedDashboard: Any + Send {
+    /// Opens caches and builds clients. Must not touch the network.
+    fn prepare(self: Box<Self>, ctx: &PrepareContext) -> anyhow::Result<Arc<dyn Dashboard>>;
+}
 
 pub struct PrepareContext<'a> {
     pub timezone: Tz,

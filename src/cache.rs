@@ -103,6 +103,21 @@ impl<T: Serialize + DeserializeOwned + Clone> SourceCache<T> {
     }
 }
 
+/// `/healthz` entry for one source: when it was fetched, whether it is stale,
+/// and the last refresh error.
+pub fn source_health<T: Serialize + DeserializeOwned + Clone>(
+    cache: &SourceCache<T>,
+    now: DateTime<Utc>,
+    max_age: Duration,
+) -> serde_json::Value {
+    let fetched_at = cache.get().map(|s| s.fetched_at);
+    serde_json::json!({
+        "fetched_at": fetched_at.map(|t| t.to_rfc3339()),
+        "stale": fetched_at.is_none_or(|t| is_stale(t, now, max_age)),
+        "last_error": cache.last_error().map(|(_, msg)| msg),
+    })
+}
+
 /// True when the data is strictly older than `max_age`.
 pub fn is_stale(fetched_at: DateTime<Utc>, now: DateTime<Utc>, max_age: Duration) -> bool {
     now - fetched_at > max_age
