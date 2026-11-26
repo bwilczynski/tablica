@@ -134,11 +134,11 @@ fn embedded_and_dir_templates_match() {
     assert_eq!(a, b);
 }
 
-/// Writes preview PNGs to `target/preview/` for eyeballing against the mockup.
+/// Writes preview PNGs to `<workspace root>/target/preview/` for eyeballing against the mockup.
 #[test]
 fn write_previews() {
     let r = renderer(TemplateSource::Embedded);
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/preview");
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
     std::fs::create_dir_all(&out).unwrap();
     let jobs = [
         ("family-morning-2bit", sample_view_morning(), BitDepth::Two),

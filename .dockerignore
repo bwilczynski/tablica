@@ -1,6 +1,6 @@
 .git
 .superpowers
 target
-tests/fixtures/librus/kid*
+**/tests/fixtures/librus/kid*
 secrets/
 .env
