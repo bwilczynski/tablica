@@ -62,7 +62,15 @@ fn next_wake(now: DateTime<Tz>, wake: NaiveTime) -> DateTime<Tz> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboards::test_support::{time, warsaw};
+    use chrono_tz::Europe::Warsaw;
+
+    fn time(h: u32, m: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
+
+    fn warsaw(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Tz> {
+        Warsaw.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
 
     fn schedule() -> Schedule {
         Schedule {

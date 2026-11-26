@@ -5,6 +5,9 @@ pub mod dashboard;
 pub mod polling;
 pub mod refresh;
 
+#[cfg(test)]
+mod render_tests;
+
 use std::path::Path;
 
 use chrono::Duration;

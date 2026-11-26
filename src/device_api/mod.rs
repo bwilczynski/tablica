@@ -2,6 +2,8 @@
 
 pub mod images;
 pub mod refresh;
+#[cfg(test)]
+pub(crate) mod stub;
 
 use std::sync::Arc;
 
@@ -17,12 +19,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use crate::cache::{SourceCache, source_health};
 use crate::config::{BitDepth, Config, Device};
-use crate::dashboards::family::{self, FamilyInputs};
-use crate::dashboards::homelab;
-use crate::family::config::FamilyConfig;
-use crate::family::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
+use crate::dashboard::Active;
 use crate::render::Renderer;
 pub use images::ImageStore;
 pub use refresh::refresh_rate;
@@ -33,9 +31,7 @@ pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<Config>,
-    /// Interim: the family section beside `cfg` until Task 5 routes through dashboards.
-    pub family: Arc<FamilyConfig>,
-    pub caches: Arc<FamilyCaches>,
+    pub dashboards: Arc<Active>,
     pub renderer: Arc<Renderer>,
     pub images: Arc<ImageStore>,
     pub clock: Clock,
@@ -59,55 +55,32 @@ fn depth_number(depth: BitDepth) -> u8 {
     }
 }
 
-/// Renders a dashboard from the cached source data as of `now`. CPU-bound.
-// Interim: maps dashboard names to the two built-in renders until Task 5.
+/// Renders dashboard `name` from its cached data as of `now`. CPU-bound.
 pub fn render_dashboard(
-    cfg: &Config,
-    family_cfg: &FamilyConfig,
-    caches: &FamilyCaches,
-    renderer: &Renderer,
-    dashboard: &str,
+    state: &AppState,
+    name: &str,
     now: DateTime<Utc>,
     depth: BitDepth,
 ) -> anyhow::Result<Vec<u8>> {
-    match dashboard {
-        "family" => {
-            let calendar = caches.calendar.get();
-            let weather = caches.weather.get();
-            let timetables: Vec<_> = caches.timetables.iter().map(SourceCache::get).collect();
-            let view = family::build(&FamilyInputs {
-                now: now.with_timezone(&cfg.timezone),
-                cfg: family_cfg,
-                calendar: calendar.as_ref(),
-                weather: weather.as_ref(),
-                timetables: timetables.iter().map(Option::as_ref).collect(),
-            });
-            renderer.render("family.html", &view, depth)
-        }
-        "homelab" => renderer.render("homelab.html", &homelab::build(), depth),
-        other => anyhow::bail!("unknown dashboard `{other}`"),
-    }
+    let dashboard = state
+        .dashboards
+        .get(name)
+        .with_context(|| format!("dashboard `{name}` is not active"))?;
+    let view = dashboard.view(now.with_timezone(&state.cfg.timezone))?;
+    state.renderer.render(name, &view, depth)
 }
 
 /// [`render_dashboard`] on the blocking pool, so a render never stalls the runtime.
 async fn render_blocking(
     state: &AppState,
-    dashboard: &str,
+    name: &str,
     now: DateTime<Utc>,
     depth: BitDepth,
 ) -> anyhow::Result<Vec<u8>> {
-    let (cfg, family, caches, renderer) = (
-        state.cfg.clone(),
-        state.family.clone(),
-        state.caches.clone(),
-        state.renderer.clone(),
-    );
-    let dashboard = dashboard.to_owned();
-    tokio::task::spawn_blocking(move || {
-        render_dashboard(&cfg, &family, &caches, &renderer, &dashboard, now, depth)
-    })
-    .await
-    .context("render task failed")?
+    let (state, name) = (state.clone(), name.to_owned());
+    tokio::task::spawn_blocking(move || render_dashboard(&state, &name, now, depth))
+        .await
+        .context("render task failed")?
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -211,7 +184,7 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
         }
     };
 
-    let switch_at = (dashboard == "family").then_some(state.family.switch_at);
+    let switch_at = state.dashboards.get(dashboard).and_then(|d| d.switch_at());
     let rate = refresh_rate(
         now.with_timezone(&state.cfg.timezone),
         &state.cfg.schedule,
@@ -270,10 +243,11 @@ async fn preview(
     Path(file): Path<String>,
     Query(q): Query<PreviewQuery>,
 ) -> Response {
-    let dashboard = match file.as_str() {
-        "family.png" => "family",
-        "homelab.png" => "homelab",
-        _ => return StatusCode::NOT_FOUND.into_response(),
+    let Some(dashboard) = file
+        .strip_suffix(".png")
+        .filter(|name| state.dashboards.contains_key(name))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     let depth = match q.depth {
         None | Some(2) => BitDepth::Two,
@@ -302,41 +276,48 @@ async fn preview(
 
 async fn healthz(State(state): State<AppState>) -> Json<Value> {
     let now = (state.clock)();
-    let caches = &state.caches;
-    Json(json!({
-        "status": "ok",
-        "sources": {
-            "calendar": source_health(&caches.calendar, now, CALENDAR_MAX_AGE),
-            "weather": source_health(&caches.weather, now, WEATHER_MAX_AGE),
-            "timetables": caches
-                .timetables
-                .iter()
-                .map(|c| source_health(c, now, TIMETABLE_MAX_AGE))
-                .collect::<Vec<_>>(),
-        },
-    }))
+    let dashboards: serde_json::Map<String, Value> = state
+        .dashboards
+        .iter()
+        .map(|(&name, d)| (name.to_owned(), d.health(now)))
+        .collect();
+    Json(json!({ "status": "ok", "dashboards": dashboards }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     use axum::body::Body;
     use axum::http::{HeaderMap, Request, StatusCode, header};
+    use chrono::{NaiveTime, TimeZone};
+    use chrono_tz::Europe::Warsaw;
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;
 
     use crate::config::{BitDepth, Device, Schedule};
-    use crate::dashboards::test_support::{sample_inputs, time, warsaw};
+    use crate::dashboard::Dashboard;
     use crate::render::TemplateSource;
+    use stub::StubDashboard;
 
     const BASE: &str = "http://tablica.test:8080";
 
+    fn time(h: u32, m: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
+
+    fn warsaw(h: u32, m: u32) -> DateTime<Utc> {
+        Warsaw
+            .with_ymd_and_hms(2026, 11, 25, h, m, 0)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
     struct Fixture {
-        _dir: tempfile::TempDir,
         state: AppState,
+        alpha: Arc<StubDashboard>,
     }
 
     fn device(name: &str, mac: &str, key: &str, dashboard: &str, depth: BitDepth) -> Device {
@@ -349,28 +330,23 @@ mod tests {
         }
     }
 
-    /// Seeded caches and a clock pinned to Wednesday 2026-11-25 07:00 Warsaw.
-    fn fixture_with(templates: TemplateSource) -> Fixture {
-        let now = warsaw(2026, 11, 25, 7, 0);
-        let dir = tempfile::tempdir().unwrap();
-        let sample = sample_inputs(now);
-        let caches = FamilyCaches::open(dir.path(), 2);
-        if let Some(c) = sample.calendar {
-            caches.calendar.put(c.data, c.fetched_at).unwrap();
-        }
-        if let Some(w) = sample.weather {
-            caches.weather.put(w.data, w.fetched_at).unwrap();
-        }
-        for (cache, tt) in caches.timetables.iter().zip(sample.timetables) {
-            if let Some(tt) = tt {
-                cache.put(tt.data, tt.fetched_at).unwrap();
-            }
-        }
+    /// Two stub dashboards and a clock pinned to Wednesday 2026-11-25 `h:m` Warsaw.
+    /// `kitchen` shows `alpha` (switches at 18:00) at 2 bits, `office` `bravo` at 1 bit.
+    fn fixture_at(h: u32, m: u32) -> Fixture {
+        let alpha = Arc::new(StubDashboard {
+            switch_at: Some(time(18, 0)),
+            ..StubDashboard::new("alpha")
+        });
+        let bravo = Arc::new(StubDashboard::new("bravo"));
+        let dashboards = Active::from([
+            ("alpha", alpha.clone() as Arc<dyn Dashboard>),
+            ("bravo", bravo as Arc<dyn Dashboard>),
+        ]);
         let cfg = Config {
-            timezone: chrono_tz::Europe::Warsaw,
+            timezone: Warsaw,
             base_url: format!("{BASE}/"),
             listen: "127.0.0.1:0".parse().unwrap(),
-            data_dir: dir.path().to_owned(),
+            data_dir: std::env::temp_dir(),
             schedule: Schedule {
                 wake: time(6, 0),
                 sleep: time(22, 0),
@@ -381,34 +357,34 @@ mod tests {
                     "kitchen",
                     "AA:BB:CC:DD:EE:01",
                     "kitchen-key",
-                    "family",
+                    "alpha",
                     BitDepth::Two,
                 ),
                 device(
                     "office",
                     "AA:BB:CC:DD:EE:02",
                     "office-key",
-                    "homelab",
+                    "bravo",
                     BitDepth::One,
                 ),
             ],
         };
-        let fixed = now.with_timezone(&Utc);
+        let renderer = Renderer::new(TemplateSource::Embedded, &dashboards).unwrap();
+        let fixed = warsaw(h, m);
         Fixture {
-            _dir: dir,
             state: AppState {
                 cfg: Arc::new(cfg),
-                family: Arc::new(sample.cfg),
-                caches: Arc::new(caches),
-                renderer: Arc::new(Renderer::new(templates).unwrap()),
+                dashboards: Arc::new(dashboards),
+                renderer: Arc::new(renderer),
                 images: Arc::new(ImageStore::new()),
                 clock: Arc::new(move || fixed),
             },
+            alpha,
         }
     }
 
     fn fixture() -> Fixture {
-        fixture_with(TemplateSource::Embedded)
+        fixture_at(7, 0)
     }
 
     fn get(uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
@@ -469,6 +445,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setup_image_url_uses_dashboard_name_and_depth() {
+        let f = fixture();
+        let (_, kitchen) =
+            send_json(&f.state, get("/api/setup", &[("ID", "AA:BB:CC:DD:EE:01")])).await;
+        assert_eq!(
+            kitchen["image_url"],
+            format!("{BASE}/preview/alpha.png?depth=2").as_str()
+        );
+        let (_, office) =
+            send_json(&f.state, get("/api/setup", &[("ID", "AA:BB:CC:DD:EE:02")])).await;
+        assert_eq!(
+            office["image_url"],
+            format!("{BASE}/preview/bravo.png?depth=1").as_str()
+        );
+    }
+
+    #[tokio::test]
     async fn display_rejects_bad_token_without_reset() {
         let f = fixture();
         for headers in [
@@ -495,7 +488,7 @@ mod tests {
 
         let filename = first["filename"].as_str().unwrap();
         assert!(filename.len() <= 31, "{filename}");
-        assert!(filename.starts_with("family-"), "{filename}");
+        assert!(filename.starts_with("alpha-"), "{filename}");
         assert!(first["refresh_rate"].is_u64(), "{first}");
         assert_eq!(first["refresh_rate"], 900);
         assert_eq!(first["status"], 0);
@@ -516,9 +509,25 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(office["filename"].as_str().unwrap().starts_with("homelab-"));
+        assert!(office["filename"].as_str().unwrap().starts_with("bravo-"));
         assert!(office["filename"].as_str().unwrap().len() <= 31);
         assert_eq!(office["reset_firmware"], false);
+    }
+
+    #[tokio::test]
+    async fn display_uses_dashboard_switch_at() {
+        let f = fixture_at(17, 50);
+        let rate = |key: &'static str| {
+            let state = f.state.clone();
+            async move {
+                let (status, body) =
+                    send_json(&state, get("/api/display", &[("Access-Token", key)])).await;
+                assert_eq!(status, StatusCode::OK);
+                body["refresh_rate"].clone()
+            }
+        };
+        assert_eq!(rate("kitchen-key").await, 660);
+        assert_eq!(rate("office-key").await, 900);
     }
 
     #[tokio::test]
@@ -537,45 +546,29 @@ mod tests {
             assert_eq!(headers[header::CONTENT_TYPE], "image/png");
             assert_eq!(png_depth(&png), depth);
         }
-        let (status, _, _) = send(&f.state, get("/images/family-00000000-1.png", &[])).await;
+        let (status, _, _) = send(&f.state, get("/images/alpha-00000000-1.png", &[])).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    fn copy_dir(from: &Path, to: &Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for entry in std::fs::read_dir(from).unwrap() {
-            let entry = entry.unwrap();
-            let target = to.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_dir(&entry.path(), &target);
-            } else {
-                std::fs::copy(entry.path(), target).unwrap();
-            }
-        }
     }
 
     #[tokio::test]
     async fn display_reuses_previous_filename_when_render_fails() {
-        let templates = tempfile::tempdir().unwrap();
-        copy_dir(Path::new("templates"), templates.path());
-        let f = fixture_with(TemplateSource::Dir(templates.path().to_owned()));
+        let f = fixture();
         let kitchen = || get("/api/display", &[("Access-Token", "kitchen-key")]);
         let (status, good) = send_json(&f.state, kitchen()).await;
         assert_eq!(status, StatusCode::OK);
 
-        std::fs::write(templates.path().join("family.html"), "{% if %}broken").unwrap();
-        std::fs::write(templates.path().join("homelab.html"), "{% if %}broken").unwrap();
+        f.alpha.fail_render.store(true, Ordering::SeqCst);
         let (status, again) = send_json(&f.state, kitchen()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(again["filename"], good["filename"]);
         assert_eq!(again["reset_firmware"], false);
 
-        let (status, _, _) = send(
-            &f.state,
-            get("/api/display", &[("Access-Token", "office-key")]),
-        )
-        .await;
+        // A device with no previous image gets 503.
+        let fresh = fixture();
+        fresh.alpha.fail_render.store(true, Ordering::SeqCst);
+        let (status, body) = send_json(&fresh.state, kitchen()).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["reset_firmware"], false);
     }
 
     #[tokio::test]
@@ -590,29 +583,48 @@ mod tests {
                 body
             }
         };
-        let morning = fetch("/preview/family.png?at=2026-11-25T07:00:00%2B01:00").await;
+        let morning = fetch("/preview/alpha.png?at=2026-11-25T07:00:00%2B01:00").await;
         assert_eq!(png_depth(&morning), png::BitDepth::Two);
         // An unencoded `+` arrives as a space; it still parses.
-        let morning_raw = fetch("/preview/family.png?at=2026-11-25T07:00:00+01:00").await;
+        let morning_raw = fetch("/preview/alpha.png?at=2026-11-25T07:00:00+01:00").await;
         assert_eq!(morning, morning_raw);
         // No `at` means the clock, which is pinned to that same morning.
-        assert_eq!(fetch("/preview/family.png").await, morning);
-        let evening = fetch("/preview/family.png?at=2026-11-25T19:00:00%2B01:00").await;
+        assert_eq!(fetch("/preview/alpha.png").await, morning);
+        let evening = fetch("/preview/alpha.png?at=2026-11-25T19:00:00%2B01:00").await;
         assert_ne!(morning, evening);
-        let one = fetch("/preview/family.png?at=2026-11-25T07:00:00%2B01:00&depth=1").await;
+        let one = fetch("/preview/alpha.png?at=2026-11-25T07:00:00%2B01:00&depth=1").await;
         assert_eq!(png_depth(&one), png::BitDepth::One);
-        let homelab = fetch("/preview/homelab.png?depth=2").await;
-        assert_eq!(png_depth(&homelab), png::BitDepth::Two);
+        let bravo = fetch("/preview/bravo.png?depth=2").await;
+        assert_eq!(png_depth(&bravo), png::BitDepth::Two);
 
         // Preview never stores images.
         assert!(f.state.images.latest("kitchen").is_none());
 
         for (uri, code) in [
             ("/preview/other.png", StatusCode::NOT_FOUND),
-            ("/preview/family.png?depth=3", StatusCode::BAD_REQUEST),
-            ("/preview/family.png?at=yesterday", StatusCode::BAD_REQUEST),
+            ("/preview/alpha", StatusCode::NOT_FOUND),
+            ("/preview/alpha.png?depth=3", StatusCode::BAD_REQUEST),
+            ("/preview/alpha.png?at=yesterday", StatusCode::BAD_REQUEST),
         ] {
             let (status, _, _) = send(&f.state, get(uri, &[])).await;
+            assert_eq!(status, code, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_query_parsing_applies_to_any_dashboard() {
+        let f = fixture();
+        for (uri, code) in [
+            (
+                "/preview/bravo.png?at=2026-11-25T07:00:00 01:00",
+                StatusCode::OK,
+            ),
+            ("/preview/bravo.png?at=nope", StatusCode::BAD_REQUEST),
+            ("/preview/bravo.png?depth=3", StatusCode::BAD_REQUEST),
+            ("/preview/zulu.png", StatusCode::NOT_FOUND),
+        ] {
+            let uri = uri.replace(' ', "%20");
+            let (status, _, _) = send(&f.state, get(&uri, &[])).await;
             assert_eq!(status, code, "{uri}");
         }
     }
@@ -651,42 +663,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn healthz_reports_staleness() {
+    async fn healthz_lists_each_active_dashboard() {
         let f = fixture();
-        let now = (f.state.clock)();
-        let weather = f.state.caches.weather.get().unwrap().data;
-        f.state
-            .caches
-            .weather
-            .put(weather, now - chrono::Duration::hours(4))
-            .unwrap();
-        f.state
-            .caches
-            .calendar
-            .record_error("http error: timeout".into(), now);
-
         let (status, body) = send_json(&f.state, get("/healthz", &[])).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["status"], "ok");
-        let sources = &body["sources"];
-        assert_eq!(sources["calendar"]["stale"], false);
-        assert_eq!(sources["calendar"]["last_error"], "http error: timeout");
-        assert!(sources["calendar"]["fetched_at"].is_string());
-        assert_eq!(sources["weather"]["stale"], true);
-        assert_eq!(sources["weather"]["last_error"], Value::Null);
-        let timetables = sources["timetables"].as_array().unwrap();
-        assert_eq!(timetables.len(), 2);
-        assert_eq!(timetables[0]["stale"], false);
-
-        // An empty cache is stale with no timestamp.
-        let empty = tempfile::tempdir().unwrap();
-        let state = AppState {
-            caches: Arc::new(FamilyCaches::open(empty.path(), 2)),
-            ..f.state.clone()
-        };
-        let (_, body) = send_json(&state, get("/healthz", &[])).await;
-        assert_eq!(body["sources"]["weather"]["stale"], true);
-        assert_eq!(body["sources"]["weather"]["fetched_at"], Value::Null);
-        assert_eq!(body["sources"]["timetables"][1]["stale"], true);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "status": "ok",
+                "dashboards": {
+                    "alpha": {"stub": "alpha"},
+                    "bravo": {"stub": "bravo"},
+                },
+            })
+        );
     }
 }

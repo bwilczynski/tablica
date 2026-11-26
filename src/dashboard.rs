@@ -1,7 +1,7 @@
 //! The plug-in contract between core and each dashboard.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,6 +32,9 @@ pub trait ParsedDashboard: Any + Send {
     /// Opens caches and builds clients. Must not touch the network.
     fn prepare(self: Box<Self>, ctx: &PrepareContext) -> anyhow::Result<Arc<dyn Dashboard>>;
 }
+
+/// The prepared dashboards, keyed by their entry name.
+pub type Active = BTreeMap<&'static str, Arc<dyn Dashboard>>;
 
 pub struct PrepareContext<'a> {
     pub timezone: Tz,

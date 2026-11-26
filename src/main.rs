@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
-use tablica::config::{Config, Loaded};
-use tablica::dashboard::{Dashboard, DashboardEntry, PrepareContext};
+use tablica::config::Loaded;
+use tablica::dashboard::{Active, DashboardEntry, PrepareContext};
 use tablica::device_api::{self, AppState, ImageStore};
 use tablica::family::dashboard::ParsedFamily;
 use tablica::render::{Renderer, TemplateSource};
@@ -78,16 +78,16 @@ fn entries() -> Vec<DashboardEntry> {
     ]
 }
 
-/// Loads the config and takes the family dashboard's parsed section out of it.
-// Interim: removed once Task 5 serves through `Dashboard` and Task 6 types capture.
-fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<(Config, ParsedFamily)> {
-    let Loaded {
-        config: cfg,
-        dashboards,
-        ..
-    } = tablica::config::load(config, secrets_dir, &entries())
-        .with_context(|| format!("loading {}", config.display()))?;
-    let family = dashboards
+fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<Loaded> {
+    tablica::config::load(config, secrets_dir, &entries())
+        .with_context(|| format!("loading {}", config.display()))
+}
+
+/// Takes the family dashboard's parsed section out of the loaded config.
+// Interim: Task 6 types capture.
+fn parsed_family(loaded: Loaded) -> anyhow::Result<ParsedFamily> {
+    let family = loaded
+        .dashboards
         .into_iter()
         .find(|d| d.name == "family")
         .context("family dashboard is not active")?;
@@ -95,7 +95,7 @@ fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<(Config, ParsedFami
     let parsed = parsed
         .downcast::<ParsedFamily>()
         .map_err(|_| anyhow!("family entry did not parse to ParsedFamily"))?;
-    Ok((cfg, *parsed))
+    Ok(*parsed)
 }
 
 /// Installs SIGTERM and SIGINT handlers; the returned future resolves on the first.
@@ -110,37 +110,39 @@ fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
     })
 }
 
-async fn serve(
-    cfg: Config,
-    family: ParsedFamily,
-    templates: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let cfg = Arc::new(cfg);
-    let family = Arc::new(
-        family
-            .into_dashboard(&PrepareContext {
-                timezone: cfg.timezone,
-                data_dir: &cfg.data_dir,
-            })
-            .context("preparing the family dashboard")?,
-    );
+async fn serve(loaded: Loaded, templates: Option<PathBuf>) -> anyhow::Result<()> {
+    let cfg = Arc::new(loaded.config);
+    let ctx = PrepareContext {
+        timezone: cfg.timezone,
+        data_dir: &cfg.data_dir,
+    };
+    let mut dashboards = Active::new();
+    for parsed in loaded.dashboards {
+        let dashboard = parsed
+            .parsed
+            .prepare(&ctx)
+            .with_context(|| format!("preparing the {} dashboard", parsed.name))?;
+        dashboards.insert(parsed.name, dashboard);
+    }
     let source = match templates {
         Some(dir) => TemplateSource::Dir(dir),
         None => TemplateSource::Embedded,
     };
-    let renderer = Arc::new(Renderer::new(source).context("building the renderer")?);
+    let renderer = Arc::new(Renderer::new(source, &dashboards).context("building the renderer")?);
 
     // Bind first: a bind failure under a restart loop must never trigger Librus logins.
     let listener = tokio::net::TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("binding {}", cfg.listen))?;
     let stop = CancellationToken::new();
-    let fetchers = family.clone().spawn_pollers(stop.clone());
+    let fetchers: Vec<_> = dashboards
+        .values()
+        .flat_map(|d| d.clone().spawn_pollers(stop.clone()))
+        .collect();
 
     let app = device_api::router(AppState {
         cfg: cfg.clone(),
-        family: Arc::new(family.cfg.clone()),
-        caches: family.caches.clone(),
+        dashboards: Arc::new(dashboards),
         renderer,
         images: Arc::new(ImageStore::new()),
         clock: Arc::new(chrono::Utc::now),
@@ -181,8 +183,7 @@ async fn main() -> anyhow::Result<()> {
             secrets_dir,
             templates,
         } => {
-            let (cfg, family) = load(&config, &secrets_dir)?;
-            serve(cfg, family, templates).await?;
+            serve(load(&config, &secrets_dir)?, templates).await?;
         }
         Command::Capture {
             source:
@@ -192,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
                     out,
                 },
         } => {
-            let (_, family) = load(&config, &secrets_dir)?;
+            let family = parsed_family(load(&config, &secrets_dir)?)?;
             tablica::sources::librus::capture(&family.cfg, &out).await?;
         }
     }

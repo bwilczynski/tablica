@@ -37,38 +37,32 @@ pub struct ParsedFamily {
     pub endpoints: Endpoints,
 }
 
-impl ParsedFamily {
+impl ParsedDashboard for ParsedFamily {
     /// Opens the caches and builds the http client. No network traffic.
-    pub fn into_dashboard(self, ctx: &PrepareContext) -> anyhow::Result<FamilyDashboard> {
+    fn prepare(self: Box<Self>, ctx: &PrepareContext) -> anyhow::Result<Arc<dyn Dashboard>> {
         let http = reqwest::Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .timeout(HTTP_TIMEOUT)
             .build()
             .context("building the http client")?;
         let caches = Arc::new(FamilyCaches::open(ctx.data_dir, self.cfg.kids.len()));
-        Ok(FamilyDashboard {
+        Ok(Arc::new(FamilyDashboard {
             cfg: self.cfg,
             tz: ctx.timezone,
             caches,
             http,
             endpoints: self.endpoints,
-        })
-    }
-}
-
-impl ParsedDashboard for ParsedFamily {
-    fn prepare(self: Box<Self>, ctx: &PrepareContext) -> anyhow::Result<Arc<dyn Dashboard>> {
-        Ok(Arc::new((*self).into_dashboard(ctx)?))
+        }))
     }
 }
 
 /// The family dashboard: calendar, weather and per-kid timetables.
 pub struct FamilyDashboard {
-    pub cfg: FamilyConfig,
-    pub tz: Tz,
-    pub caches: Arc<FamilyCaches>,
-    pub http: reqwest::Client,
-    pub endpoints: Endpoints,
+    cfg: FamilyConfig,
+    tz: Tz,
+    caches: Arc<FamilyCaches>,
+    http: reqwest::Client,
+    endpoints: Endpoints,
 }
 
 impl Dashboard for FamilyDashboard {
@@ -245,34 +239,19 @@ mod tests {
     use crate::dashboards::test_support::{config, sample_inputs, warsaw};
     use wiremock::MockServer;
 
+    /// A family dashboard over `dir`, seeded with the sample data when `seeded`.
     fn dashboard_in(dir: &tempfile::TempDir, seeded: bool) -> FamilyDashboard {
-        let now = warsaw(2026, 11, 25, 7, 0);
-        let sample = sample_inputs(now);
-        let ctx = PrepareContext {
-            timezone: chrono_tz::Europe::Warsaw,
-            data_dir: dir.path(),
-        };
-        let family = ParsedFamily {
-            cfg: sample.cfg.clone(),
+        let sample = sample_inputs(warsaw(2026, 11, 25, 7, 0));
+        if seeded {
+            sample.seed(dir.path());
+        }
+        FamilyDashboard {
+            caches: Arc::new(FamilyCaches::open(dir.path(), sample.cfg.kids.len())),
+            cfg: sample.cfg,
+            tz: chrono_tz::Europe::Warsaw,
+            http: reqwest::Client::new(),
             endpoints: Endpoints::default(),
         }
-        .into_dashboard(&ctx)
-        .unwrap();
-        if seeded {
-            let caches = &family.caches;
-            if let Some(c) = sample.calendar {
-                caches.calendar.put(c.data, c.fetched_at).unwrap();
-            }
-            if let Some(w) = sample.weather {
-                caches.weather.put(w.data, w.fetched_at).unwrap();
-            }
-            for (cache, tt) in caches.timetables.iter().zip(sample.timetables) {
-                if let Some(tt) = tt {
-                    cache.put(tt.data, tt.fetched_at).unwrap();
-                }
-            }
-        }
-        family
     }
 
     #[test]
@@ -297,11 +276,39 @@ mod tests {
         let health = family.health(warsaw(2026, 11, 25, 7, 0).with_timezone(&Utc));
         let timetables = health["timetables"].as_array().unwrap();
         assert_eq!(timetables.len(), family.cfg.kids.len());
-        for entry in [&health["calendar"], &health["weather"], &timetables[0]] {
+        let entries = [&health["calendar"], &health["weather"]]
+            .into_iter()
+            .chain(timetables);
+        for entry in entries {
             for key in ["fetched_at", "stale", "last_error"] {
                 assert!(entry.get(key).is_some(), "{key} missing in {entry}");
             }
         }
+    }
+
+    #[test]
+    fn family_health_reports_staleness_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dashboard_in(&dir, true);
+        let now = warsaw(2026, 11, 25, 7, 0).with_timezone(&Utc);
+        let weather = family.caches.weather.get().unwrap().data;
+        family
+            .caches
+            .weather
+            .put(weather, now - chrono::Duration::hours(4))
+            .unwrap();
+        family
+            .caches
+            .calendar
+            .record_error("http error: timeout".into(), now);
+
+        let health = family.health(now);
+        assert_eq!(health["calendar"]["stale"], false);
+        assert_eq!(health["calendar"]["last_error"], "http error: timeout");
+        assert!(health["calendar"]["fetched_at"].is_string());
+        assert_eq!(health["weather"]["stale"], true);
+        assert!(health["weather"]["last_error"].is_null());
+        assert_eq!(health["timetables"][0]["stale"], false);
     }
 
     #[test]
@@ -317,6 +324,27 @@ mod tests {
             assert!(s["fetched_at"].is_null());
             assert!(s["last_error"].is_null());
         }
+    }
+
+    #[test]
+    fn prepare_reads_the_cache_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = warsaw(2026, 11, 25, 7, 0);
+        let sample = sample_inputs(now);
+        sample.seed(dir.path());
+        let ctx = PrepareContext {
+            timezone: chrono_tz::Europe::Warsaw,
+            data_dir: dir.path(),
+        };
+        let parsed = ParsedFamily {
+            cfg: sample.cfg.clone(),
+            endpoints: Endpoints::default(),
+        };
+        let dashboard = Box::new(parsed).prepare(&ctx).unwrap();
+        assert_eq!(
+            dashboard.view(now).unwrap().context,
+            minijinja::Value::from_serialize(family::build(&sample.inputs(now)))
+        );
     }
 
     #[tokio::test]
