@@ -1,6 +1,6 @@
 #[cfg(test)]
+mod capture_tests;
+#[cfg(test)]
 mod config_tests;
-pub mod dashboards;
-pub mod family;
-pub mod sources;
-pub mod text;
+#[cfg(test)]
+mod render_tests;

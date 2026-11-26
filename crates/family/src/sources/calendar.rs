@@ -233,6 +233,13 @@ fn occurrences(raw: &RawEvent, tz: Tz, win: &Window) -> Vec<Moment> {
     let Some(rule) = &raw.rrule else {
         return Vec::new();
     };
+    // `RRuleSet` parses several property lines. A rule mistyped as TEXT comes
+    // unescaped, so a line break in it would smuggle in extra lines (whose values
+    // `rrule` may quote in its own warnings). Only a single rule line is accepted.
+    if rule.chars().any(is_line_break) {
+        warn!(source = "calendar", "skipping event with unusable RRULE");
+        return Vec::new();
+    }
     let (rule, until) = split_until(rule);
     let (dtstart_line, event_tz) = match raw.start {
         Moment::Date(d) => {
@@ -297,6 +304,14 @@ fn occurrences(raw: &RawEvent, tz: Tz, win: &Window) -> Vec<Moment> {
         found.push(occ);
     }
     found
+}
+
+/// CR, LF and the other characters Unicode treats as line delimiters.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
 }
 
 /// Removes `UNTIL=` from an RRULE value, returning the rest and the raw value.
@@ -513,12 +528,30 @@ mod tests {
                    RRULE:FREQ=SECRETSENTINEL\nSUMMARY:SECRETSENTINEL\nEND:VEVENT\n\
                    END:VCALENDAR\n";
         let events = events_in(ics, tz, day, day).unwrap();
+        // An RRULE mistyped as TEXT has its escaped line break unescaped by the
+        // parser, giving an extra property line whose unexpected date parameter
+        // `rrule` would quote in a warning.
+        let escaped = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u2\n\
+                       DTSTART:20261125T100000Z\n\
+                       RRULE;VALUE=TEXT:FREQ=DAILY\\nRDATE;VALUE=SECRETSENTINEL:20261126T100000Z\n\
+                       SUMMARY:Daily\nEND:VEVENT\nEND:VCALENDAR\n";
+        let escaped_events = events_in(escaped, tz, day, day).unwrap();
+        assert!(
+            escaped_events.is_empty(),
+            "{escaped_events:?} {}",
+            logs.text()
+        );
         let broken = "BEGIN:VCALENDAR\nEND:SECRETSENTINEL\nEND:VCALENDAR\n";
         let err = events_in(broken, tz, day, day).unwrap_err();
         let seen = format!("{err} {err:?} {events:?} {}", logs.text());
         assert!(logs.text().contains("unusable RRULE"), "{}", logs.text());
         assert!(!seen.contains("SECRETSENTINEL-uid"), "{seen}");
-        assert!(!logs.text().contains("SECRETSENTINEL"), "{}", logs.text());
+        // `rrule` lowercases the parameters it quotes.
+        assert!(
+            !logs.text().to_lowercase().contains("secretsentinel"),
+            "{}",
+            logs.text()
+        );
         assert!(
             !format!("{err} {err:?}").contains("SECRETSENTINEL"),
             "{err}"

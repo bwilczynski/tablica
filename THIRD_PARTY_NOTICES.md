@@ -2,7 +2,7 @@
 
 ## librus-api
 
-The Librus Synergia login flow in `src/sources/librus/` is a Rust port of the
+The Librus Synergia login flow in `crates/family/src/sources/librus/auth.rs` is a Rust port of the
 `authorize` flow in [librus-api](https://github.com/Mati365/librus-api), which is
 distributed under the MIT License (as declared in its `package.json`):
 

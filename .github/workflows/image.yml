@@ -3,12 +3,9 @@ name: Image
 on:
   pull_request:
     paths:
-      - "src/**"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "build.rs"
-      - "templates/**"
       - "assets/**"
       - "config.sample.toml"
       - "rust-toolchain.toml"

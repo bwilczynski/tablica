@@ -1,21 +1,24 @@
 //! Shared fixtures for view-model and render tests.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::{Europe::Warsaw, Tz};
 
-use super::family::{self, FamilyInputs, FamilyView};
-use crate::family::FamilyCaches;
-use crate::family::config::{FamilyConfig, KidConfig, WeatherConfig};
+use crate::caches::FamilyCaches;
+use crate::config::{FamilyConfig, KidConfig, WeatherConfig};
+use crate::dashboard::{Endpoints, ParsedFamily};
 use crate::sources::calendar::IcsSnapshot;
 use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::{Daily, HourlyPrecip, Weather};
 use crate::text::{Condition, PrecipKind};
+use crate::view::{self, FamilyInputs, FamilyView};
 use tablica_core::cache::Stamped;
+use tablica_core::dashboard::{Dashboard, ParsedDashboard, PrepareContext};
 
 /// Owned source data; borrow it as [`FamilyInputs`] with [`Sample::inputs`].
-pub(crate) struct Sample {
+pub struct Sample {
     pub cfg: FamilyConfig,
     pub calendar: Option<Stamped<IcsSnapshot>>,
     pub weather: Option<Stamped<Weather>>,
@@ -50,19 +53,31 @@ impl Sample {
     }
 }
 
-pub(crate) fn warsaw(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Tz> {
+#[cfg(test)]
+/// A temp dir holding a copy of `tests/fixtures/cache` (the pre-split cache files).
+pub fn copy_cache_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cache");
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
+    }
+    dir
+}
+
+pub fn warsaw(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Tz> {
     Warsaw.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
 }
 
-pub(crate) fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+pub fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
 
-pub(crate) fn time(h: u32, m: u32) -> NaiveTime {
+pub fn time(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).unwrap()
 }
 
-pub(crate) fn config(kids: usize) -> FamilyConfig {
+pub fn config(kids: usize) -> FamilyConfig {
     FamilyConfig {
         switch_at: time(18, 0),
         calendar_days: 7,
@@ -81,7 +96,7 @@ pub(crate) fn config(kids: usize) -> FamilyConfig {
     }
 }
 
-pub(crate) fn lesson(h: u32, m: u32, subject: &str) -> Lesson {
+pub fn lesson(h: u32, m: u32, subject: &str) -> Lesson {
     let start = time(h, m);
     Lesson {
         start,
@@ -94,14 +109,14 @@ pub(crate) fn lesson(h: u32, m: u32, subject: &str) -> Lesson {
     }
 }
 
-pub(crate) fn stamped<T>(data: T, at: DateTime<Utc>) -> Stamped<T> {
+pub fn stamped<T>(data: T, at: DateTime<Utc>) -> Stamped<T> {
     Stamped {
         data,
         fetched_at: at,
     }
 }
 
-pub(crate) fn weather() -> Weather {
+pub fn weather() -> Weather {
     Weather {
         current_temp_c: 4.4,
         current: Condition::Cloudy,
@@ -134,7 +149,7 @@ pub(crate) fn weather() -> Weather {
 
 /// One VEVENT; `start`/`end` are ICS values such as `20261125T163000` (Warsaw)
 /// or, when `all_day`, `20261126` (end exclusive).
-pub(crate) fn vevent(n: usize, title: &str, start: &str, end: &str, all_day: bool) -> String {
+pub fn vevent(n: usize, title: &str, start: &str, end: &str, all_day: bool) -> String {
     let (s, e) = if all_day {
         (
             format!("DTSTART;VALUE=DATE:{start}"),
@@ -152,11 +167,11 @@ pub(crate) fn vevent(n: usize, title: &str, start: &str, end: &str, all_day: boo
 }
 
 /// Adds a `LOCATION` to a [`vevent`].
-pub(crate) fn located(vevent: String, location: &str) -> String {
+pub fn located(vevent: String, location: &str) -> String {
     vevent.replace("END:VEVENT", &format!("LOCATION:{location}\r\nEND:VEVENT"))
 }
 
-pub(crate) fn ics(events: &[String]) -> IcsSnapshot {
+pub fn ics(events: &[String]) -> IcsSnapshot {
     IcsSnapshot {
         text: format!(
             "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n{}END:VCALENDAR\r\n",
@@ -171,7 +186,7 @@ fn day(lessons: &[(u32, u32, &str)]) -> Vec<Lesson> {
 }
 
 /// Realistic data around Wednesday 2026-11-25, fetched five minutes before `now`.
-pub(crate) fn sample_inputs(now: DateTime<Tz>) -> Sample {
+pub fn sample_inputs(now: DateTime<Tz>) -> Sample {
     let fresh = now.with_timezone(&Utc) - Duration::minutes(5);
     let calendar = ics(&[
         located(
@@ -265,19 +280,19 @@ pub(crate) fn sample_inputs(now: DateTime<Tz>) -> Sample {
     }
 }
 
-pub(crate) fn sample_view_morning() -> FamilyView {
+pub fn sample_view_morning() -> FamilyView {
     let now = warsaw(2026, 11, 25, 7, 0);
-    family::build(&sample_inputs(now).inputs(now))
+    view::build(&sample_inputs(now).inputs(now))
 }
 
-pub(crate) fn sample_view_evening() -> FamilyView {
+pub fn sample_view_evening() -> FamilyView {
     let now = warsaw(2026, 11, 25, 19, 0);
-    family::build(&sample_inputs(now).inputs(now))
+    view::build(&sample_inputs(now).inputs(now))
 }
 
 /// Longest realistic content: long titles and locations, 13 events (overflow), nine lessons
 /// per kid with long subjects, cancellations and flags, and a stale footnote.
-pub(crate) fn worst_case_inputs(now: DateTime<Tz>) -> Sample {
+pub fn worst_case_inputs(now: DateTime<Tz>) -> Sample {
     let mut sample = sample_inputs(now);
     let long = "Bardzo długi tytuł wydarzenia rodzinnego który nie mieści się w kolumnie";
     let events: Vec<String> = (0..13)
@@ -338,7 +353,24 @@ pub(crate) fn worst_case_inputs(now: DateTime<Tz>) -> Sample {
     sample
 }
 
-pub(crate) fn worst_case_view() -> FamilyView {
+pub fn worst_case_view() -> FamilyView {
     let now = warsaw(2026, 11, 25, 7, 0);
-    family::build(&worst_case_inputs(now).inputs(now))
+    view::build(&worst_case_inputs(now).inputs(now))
+}
+
+/// The family dashboard prepared over `data_dir`, its caches seeded with the sample
+/// at 07:00 Warsaw.
+pub fn seeded_family(data_dir: &Path) -> Arc<dyn Dashboard> {
+    let sample = sample_inputs(warsaw(2026, 11, 25, 7, 0));
+    sample.seed(data_dir);
+    let ctx = PrepareContext {
+        timezone: Warsaw,
+        data_dir,
+    };
+    Box::new(ParsedFamily {
+        cfg: sample.cfg,
+        endpoints: Endpoints::default(),
+    })
+    .prepare(&ctx)
+    .unwrap()
 }

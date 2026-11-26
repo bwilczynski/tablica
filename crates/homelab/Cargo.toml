@@ -1,0 +1,27 @@
+[package]
+name = "tablica-homelab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Homelab placeholder dashboard"
+publish = false
+
+[dependencies]
+tablica-core = { path = "../core" }
+anyhow.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+minijinja.workspace = true
+minijinja-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+png.workspace = true
+
+[build-dependencies]
+minijinja-embed.workspace = true

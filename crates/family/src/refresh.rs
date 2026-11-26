@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use tracing::{info, warn};
 
-use crate::family::config::KidConfig;
+use crate::config::KidConfig;
 use crate::sources::SourceError;
 use crate::sources::calendar::{self, FetchOutcome, IcsSnapshot};
 use crate::sources::librus::timetable::{self, Timetable};
@@ -88,7 +88,7 @@ pub async fn refresh_calendar_once(
 pub async fn refresh_weather_once(
     http: &reqwest::Client,
     base_url: &str,
-    cfg: &crate::family::config::WeatherConfig,
+    cfg: &crate::config::WeatherConfig,
     tz: Tz,
     cache: &SourceCache<Weather>,
     now: DateTime<Utc>,
@@ -220,7 +220,7 @@ mod tests {
             let (logs, _guard) = Logs::capture();
             let dir = tempfile::tempdir().unwrap();
             let cache = SourceCache::<Weather>::open(dir.path().join("weather.json"));
-            let cfg = crate::family::config::WeatherConfig {
+            let cfg = crate::config::WeatherConfig {
                 latitude: 52.2,
                 longitude: 21.0,
             };
@@ -492,7 +492,7 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let cache = SourceCache::<Weather>::open(dir.path().join("weather.json"));
-        let cfg = crate::family::config::WeatherConfig {
+        let cfg = crate::config::WeatherConfig {
             latitude: 52.2,
             longitude: 21.0,
         };

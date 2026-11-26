@@ -149,7 +149,7 @@ mod tests {
     use std::path::Path;
     use tablica_core::config::Secrets;
 
-    const SAMPLE: &str = include_str!("../../../../config.sample.toml");
+    const SAMPLE: &str = include_str!("../../../config.sample.toml");
 
     fn write_secrets(dir: &Path) {
         for (name, value) in [

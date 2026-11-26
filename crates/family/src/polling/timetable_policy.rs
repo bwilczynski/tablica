@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 use rand::rngs::StdRng;
 
 use super::windows::{in_window, next_scheduled};
-use crate::family::{FamilyCaches, TIMETABLE_MAX_AGE};
+use crate::caches::{FamilyCaches, TIMETABLE_MAX_AGE};
 use crate::sources::librus::timetable::Timetable;
 use tablica_core::cache::is_stale;
 use tablica_core::polling::{Outcome, PollPolicy, backoff_delay, between, jittered};
@@ -589,12 +589,7 @@ mod tests {
 
     #[test]
     fn cached_fixture_takes_warm_start() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cache");
-        for entry in std::fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
-        }
+        let dir = crate::test_support::copy_cache_fixture();
         let caches = Arc::new(FamilyCaches::open(dir.path(), 1));
         let fetched_at = caches.timetables[0].get().unwrap().fetched_at;
         let now = (fetched_at + chrono::Duration::hours(1)).with_timezone(&WARSAW);

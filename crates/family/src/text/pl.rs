@@ -15,7 +15,6 @@ pub const NO_LESSONS: &str = "Brak lekcji";
 pub const CALENDAR_UNAVAILABLE: &str = "Kalendarz niedostępny";
 pub const TIMETABLE_UNAVAILABLE: &str = "Plan lekcji niedostępny";
 pub const WEATHER_UNAVAILABLE: &str = "Pogoda niedostępna";
-pub const HOMELAB_PLACEHOLDER: &str = "Homelab: wkrótce";
 pub const TOMORROW_PREFIX: &str = "jutro: ";
 
 const WEEKDAYS_LONG: [&str; 7] = [
@@ -306,7 +305,6 @@ mod tests {
         assert_eq!(CALENDAR_UNAVAILABLE, "Kalendarz niedostępny");
         assert_eq!(TIMETABLE_UNAVAILABLE, "Plan lekcji niedostępny");
         assert_eq!(WEATHER_UNAVAILABLE, "Pogoda niedostępna");
-        assert_eq!(HOMELAB_PLACEHOLDER, "Homelab: wkrótce");
         assert_eq!(TOMORROW_PREFIX, "jutro: ");
     }
 }

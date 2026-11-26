@@ -1,12 +1,4 @@
-//! The family dashboard's data: its caches and how its sources are polled.
-
-pub mod config;
-pub mod dashboard;
-pub mod polling;
-pub mod refresh;
-
-#[cfg(test)]
-mod render_tests;
+//! The family dashboard's source caches.
 
 use std::path::Path;
 
@@ -84,20 +76,10 @@ mod tests {
         assert_eq!(WEATHER_MAX_AGE, Duration::hours(3));
     }
 
-    fn copy_fixture() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cache");
-        for entry in std::fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
-        }
-        dir
-    }
-
     #[test]
     fn pre_split_cache_files_load_unchanged() {
-        use crate::dashboards::test_support::{sample_inputs, warsaw};
-        let dir = copy_fixture();
+        use crate::test_support::{copy_cache_fixture, sample_inputs, warsaw};
+        let dir = copy_cache_fixture();
         let caches = FamilyCaches::open(dir.path(), 1);
         let expected = sample_inputs(warsaw(2026, 11, 25, 7, 0));
         let fetched_at = Utc.with_ymd_and_hms(2026, 11, 25, 5, 55, 0).unwrap();

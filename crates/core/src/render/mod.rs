@@ -41,16 +41,12 @@ enum Templates {
     Dir(Box<AutoReloader>),
 }
 
-/// An environment holding `dashboard`'s embedded bundle, every template compiled.
-fn embedded_env(name: &str, dashboard: &dyn Dashboard) -> anyhow::Result<Environment<'static>> {
+/// An environment holding `dashboard`'s embedded bundle. `load_templates!` compiles
+/// every template and panics on invalid syntax, so a broken bundle fails startup.
+fn embedded_env(dashboard: &dyn Dashboard) -> Environment<'static> {
     let mut env = Environment::new();
     dashboard.load_templates(&mut env);
-    let names: Vec<String> = env.templates().map(|(n, _)| n.to_owned()).collect();
-    for template in names {
-        env.get_template(&template)
-            .with_context(|| format!("loading template {template} of dashboard {name}"))?;
-    }
-    Ok(env)
+    env
 }
 
 /// Newest modification time and total size of all files under `dir`.
@@ -87,8 +83,8 @@ impl Renderer {
             TemplateSource::Embedded => Templates::Embedded(
                 dashboards
                     .iter()
-                    .map(|(&name, d)| Ok((name, embedded_env(name, d.as_ref())?)))
-                    .collect::<anyhow::Result<_>>()?,
+                    .map(|(&name, d)| (name, embedded_env(d.as_ref())))
+                    .collect(),
             ),
             TemplateSource::Dir(dir) => {
                 Templates::Dir(Box::new(AutoReloader::new(move |notifier| {
@@ -198,5 +194,50 @@ mod tests {
             );
         }
         assert!(r.render("bravo", &view(), BitDepth::Two).is_err());
+    }
+
+    /// Registers `shared.html` with its own body; every dashboard uses the same name.
+    struct Shared(&'static str);
+
+    impl Dashboard for Shared {
+        fn load_templates(&self, env: &mut minijinja::Environment<'static>) {
+            env.add_template("shared.html", self.0).unwrap();
+        }
+        fn spawn_pollers(
+            self: Arc<Self>,
+            _shutdown: tokio_util::sync::CancellationToken,
+        ) -> Vec<tokio::task::JoinHandle<()>> {
+            Vec::new()
+        }
+        fn view(&self, _now: chrono::DateTime<chrono_tz::Tz>) -> anyhow::Result<View> {
+            unreachable!("not rendered through view")
+        }
+        fn health(&self, _now: chrono::DateTime<chrono::Utc>) -> serde_json::Value {
+            serde_json::json!({})
+        }
+    }
+
+    #[test]
+    fn embedded_bundles_are_isolated() {
+        let page = |text: &str| {
+            format!(
+                r#"<div style="width: 800px; height: 480px; background: white; color: black; font-family: Inter; font-size: 48px;"><p>{text}</p></div>"#
+            )
+        };
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+        let one: Arc<dyn Dashboard> = Arc::new(Shared(leak(page("one"))));
+        let two: Arc<dyn Dashboard> = Arc::new(Shared(leak(page("two"))));
+        let r = Renderer::new(
+            TemplateSource::Embedded,
+            &Active::from([("alpha", one), ("bravo", two)]),
+        )
+        .unwrap();
+        let view = View {
+            template: "shared.html",
+            context: minijinja::Value::UNDEFINED,
+        };
+        let a = r.render("alpha", &view, BitDepth::Two).unwrap();
+        let b = r.render("bravo", &view, BitDepth::Two).unwrap();
+        assert_ne!(a, b);
     }
 }

@@ -36,5 +36,6 @@ tokio-util = "0.7.20"
 toml = "1.2.3"
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
+tracing-log = "0.2.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 wiremock = "0.6.5"

@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tablica::family::dashboard::family_kids;
 use tablica_core::config::Loaded;
 use tablica_core::dashboard::DashboardEntry;
 use tablica_core::render::TemplateSource;
 use tablica_core::server::ServeOptions;
+use tablica_family::family_kids;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -69,10 +69,7 @@ fn init_logging() {
 }
 
 fn entries() -> Vec<DashboardEntry> {
-    vec![
-        tablica::family::dashboard::entry(),
-        tablica::dashboards::homelab::entry(),
-    ]
+    vec![tablica_family::entry(), tablica_homelab::entry()]
 }
 
 fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<Loaded> {
@@ -122,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 },
         } => {
             let kids = family_kids(load(&config, &secrets_dir)?)?;
-            tablica::sources::librus::capture(&kids, &out).await?;
+            tablica_family::capture(&kids, &out).await?;
         }
     }
     Ok(())
