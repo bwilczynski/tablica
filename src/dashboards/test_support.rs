@@ -132,6 +132,11 @@ pub(crate) fn vevent(n: usize, title: &str, start: &str, end: &str, all_day: boo
     )
 }
 
+/// Adds a `LOCATION` to a [`vevent`].
+pub(crate) fn located(vevent: String, location: &str) -> String {
+    vevent.replace("END:VEVENT", &format!("LOCATION:{location}\r\nEND:VEVENT"))
+}
+
 pub(crate) fn ics(events: &[String]) -> IcsSnapshot {
     IcsSnapshot {
         text: format!(
@@ -150,14 +155,20 @@ fn day(lessons: &[(u32, u32, &str)]) -> Vec<Lesson> {
 pub(crate) fn sample_inputs(now: DateTime<Tz>) -> Sample {
     let fresh = now.with_timezone(&Utc) - Duration::minutes(5);
     let calendar = ics(&[
-        vevent(
-            1,
-            "Pływanie (Kid 1)",
-            "20261125T163000",
-            "20261125T173000",
-            false,
+        located(
+            vevent(
+                1,
+                "Pływanie (Kid 1)",
+                "20261125T163000",
+                "20261125T173000",
+                false,
+            ),
+            "Pływalnia Polna",
         ),
-        vevent(2, "Wywiadówka", "20261125T180000", "20261125T193000", false),
+        located(
+            vevent(2, "Wywiadówka", "20261125T180000", "20261125T193000", false),
+            "SP 12\\, sala 21",
+        ),
         vevent(3, "Babcia - urodziny", "20261126", "20261127", true),
         vevent(
             4,
@@ -166,7 +177,10 @@ pub(crate) fn sample_inputs(now: DateTime<Tz>) -> Sample {
             "20261126T181500",
             false,
         ),
-        vevent(5, "Kino", "20261127T190000", "20261127T210000", false),
+        located(
+            vevent(5, "Kino", "20261127T190000", "20261127T210000", false),
+            "Kino Muranów\\nul. Gen. Andersa 5\\, Warszawa",
+        ),
     ]);
 
     let mut kid1 = Timetable {
@@ -242,7 +256,7 @@ pub(crate) fn sample_view_evening() -> FamilyView {
     family::build(&sample_inputs(now).inputs(now))
 }
 
-/// Longest realistic content: long titles, 13 events (overflow), nine lessons
+/// Longest realistic content: long titles and locations, 13 events (overflow), nine lessons
 /// per kid with long subjects, cancellations and flags, and a stale footnote.
 pub(crate) fn worst_case_inputs(now: DateTime<Tz>) -> Sample {
     let mut sample = sample_inputs(now);
@@ -250,13 +264,21 @@ pub(crate) fn worst_case_inputs(now: DateTime<Tz>) -> Sample {
     let events: Vec<String> = (0..13)
         .map(|i| {
             let d = 25 + i / 4;
-            vevent(
+            let ev = vevent(
                 i as usize,
                 long,
                 &format!("202611{d}T{:02}0000", 17 + i % 4),
                 &format!("202611{d}T{:02}3000", 17 + i % 4),
                 false,
-            )
+            );
+            if i % 2 == 0 {
+                located(
+                    ev,
+                    "Centrum Sportu i Rekreacji przy ulicy Bardzo Długiej 123",
+                )
+            } else {
+                ev
+            }
         })
         .collect();
     sample.calendar = Some(stamped(

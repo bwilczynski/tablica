@@ -40,6 +40,8 @@ pub enum FetchOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalendarEvent {
     pub title: String,
+    /// First line of `LOCATION`; iCloud puts the street address on later lines.
+    pub location: Option<String>,
     pub when: EventWhen,
 }
 
@@ -107,6 +109,7 @@ enum Moment {
 struct RawEvent {
     uid: String,
     title: String,
+    location: Option<String>,
     start: Moment,
     /// Length: whole days for all-day events, otherwise a real duration.
     span: Span,
@@ -217,6 +220,7 @@ fn push_if_overlaps(
     };
     out.push(CalendarEvent {
         title: raw.title.clone(),
+        location: raw.location.clone(),
         when,
     });
 }
@@ -470,6 +474,14 @@ fn raw_event(c: &Component<'_>, local: Tz) -> Option<RawEvent> {
         title: prop(c, "SUMMARY")
             .map(|p| p.val.clone().unescape_text().as_str().trim().to_owned())
             .unwrap_or_default(),
+        location: prop(c, "LOCATION").and_then(|p| {
+            let text = p.val.clone().unescape_text();
+            text.as_str()
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .map(str::to_owned)
+        }),
         start,
         span,
         rrule: prop(c, "RRULE").map(|p| p.val.as_str().to_owned()),
@@ -516,6 +528,7 @@ mod tests {
         .unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].title, "Dentist");
+        assert_eq!(evs[0].location, None);
         let (s, e) = timed(&evs[0]);
         assert_eq!((s.hour(), s.minute()), (14, 30));
         assert_eq!((e.hour(), e.minute()), (15, 30));
@@ -711,6 +724,20 @@ mod tests {
         let evs = events_in(&ics, WARSAW, d(2026, 11, 25), d(2026, 11, 25)).unwrap();
         let titles: Vec<_> = evs.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["Holiday", "Dentist"]);
+    }
+
+    #[test]
+    fn location_keeps_first_non_empty_line() {
+        let ics = fixture("single_timed").replace(
+            "SUMMARY:Dentist\r\n",
+            "SUMMARY:Dentist\r\nLOCATION:\\nKino Muranów\\nul. Gen. Andersa 5\\, Warszawa\r\n",
+        );
+        let evs = events_in(&ics, WARSAW, d(2026, 11, 25), d(2026, 11, 25)).unwrap();
+        assert_eq!(evs[0].location.as_deref(), Some("Kino Muranów"));
+        let blank = fixture("single_timed")
+            .replace("SUMMARY:Dentist\r\n", "SUMMARY:Dentist\r\nLOCATION: \r\n");
+        let evs = events_in(&blank, WARSAW, d(2026, 11, 25), d(2026, 11, 25)).unwrap();
+        assert_eq!(evs[0].location, None);
     }
 
     #[test]

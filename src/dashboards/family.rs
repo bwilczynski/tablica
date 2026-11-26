@@ -13,8 +13,20 @@ use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::Weather;
 use crate::text::{Condition, pl};
 
-/// Calendar lines shown before the rest collapse into a "+N więcej" line.
-pub const MAX_CALENDAR_EVENTS: usize = 10;
+// Calendar heights in px, mirroring `templates/family.html`. Rows that don't
+// fit collapse into a "+N więcej" line.
+/// Column height under the heading: 416 − 20 padding − 25.25 `.h4`, rounded down.
+const CALENDAR_PX: u32 = 370;
+/// `.small` stale note: 12px × 1.25.
+const NOTE_PX: u32 = 15;
+/// `.more`: 19px line plus 6px top margin.
+const MORE_PX: u32 = 25;
+/// `.cday`: 22px band plus 6px top margin.
+const DAY_PX: u32 = 28;
+/// `.ev`: 19px title line plus 4px top margin.
+const EVENT_PX: u32 = 23;
+/// `.loc`: 16px second line.
+const LOCATION_PX: u32 = 16;
 
 /// Minimum precipitation probability worth mentioning, in percent.
 const PRECIP_THRESHOLD: u8 = 30;
@@ -48,7 +60,10 @@ pub struct CalendarCol {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CalDay {
+    #[serde(skip)]
+    pub date: NaiveDate,
     pub label: String,
+    pub today: bool,
     pub events: Vec<EventLine>,
 }
 
@@ -56,6 +71,7 @@ pub struct CalDay {
 pub struct EventLine {
     pub time: String,
     pub title: String,
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -214,14 +230,40 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
     }
     lines.sort_by_key(|l| l.0);
 
+    let costs: Vec<u32> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, ((date, _, _), line))| {
+            let new_day = i == 0 || lines[i - 1].0.0 != *date;
+            u32::from(new_day) * DAY_PX
+                + EVENT_PX
+                + u32::from(line.location.is_some()) * LOCATION_PX
+        })
+        .collect();
+    let room = CALENDAR_PX - if col.note.is_some() { NOTE_PX } else { 0 };
+    let shown = if costs.iter().sum::<u32>() <= room {
+        costs.len()
+    } else {
+        let budget = room - MORE_PX;
+        costs
+            .iter()
+            .scan(0, |used, c| {
+                *used += c;
+                Some(*used)
+            })
+            .take_while(|used| *used <= budget)
+            .count()
+    };
+
     let total = lines.len();
     let mut days: Vec<CalDay> = vec![];
-    let mut current: Option<NaiveDate> = None;
-    for ((date, _, _), line) in lines.into_iter().take(MAX_CALENDAR_EVENTS) {
-        if current != Some(date) {
-            current = Some(date);
+    for ((date, _, _), line) in lines.into_iter().take(shown) {
+        let new_day = days.last().is_none_or(|d| d.date != date);
+        if new_day {
             days.push(CalDay {
+                date,
                 label: pl::day_label(date, today),
+                today: date == today,
                 events: vec![],
             });
         }
@@ -230,8 +272,8 @@ fn build_calendar(inputs: &FamilyInputs, today: NaiveDate) -> CalendarCol {
         }
     }
     col.days = days;
-    if total > MAX_CALENDAR_EVENTS {
-        col.more = Some(pl::more(total - MAX_CALENDAR_EVENTS));
+    if total > shown {
+        col.more = Some(pl::more(total - shown));
     }
     col
 }
@@ -250,6 +292,7 @@ fn collect_lines(
     if title.is_empty() {
         return;
     }
+    let location = ev.location.clone();
     match &ev.when {
         EventWhen::AllDay { first, last } => {
             let mut d = (*first).max(today);
@@ -259,6 +302,7 @@ fn collect_lines(
                     EventLine {
                         time: pl::ALL_DAY.to_string(),
                         title: title.to_string(),
+                        location: location.clone(),
                     },
                 ));
                 let Some(next) = d.succ_opt() else { break };
@@ -280,6 +324,7 @@ fn collect_lines(
                 EventLine {
                     time: pl::hm(start.time()),
                     title: title.to_string(),
+                    location,
                 },
             ));
         }
@@ -597,9 +642,18 @@ mod tests {
     }
 
     fn cal_view(now: DateTime<Tz>, events: &[String], days: u32) -> CalendarCol {
+        cal_view_fetched(now, events, days, Duration::zero())
+    }
+
+    fn cal_view_fetched(
+        now: DateTime<Tz>,
+        events: &[String],
+        days: u32,
+        age: Duration,
+    ) -> CalendarCol {
         let mut cfg = config(0);
         cfg.calendar_days = days;
-        let cal = stamped(ics(events), now.with_timezone(&Utc));
+        let cal = stamped(ics(events), now.with_timezone(&Utc) - age);
         let inputs = FamilyInputs {
             now,
             cfg: &cfg,
@@ -614,7 +668,10 @@ mod tests {
     fn calendar_groups_days_and_drops_ended_events() {
         let events = [
             vevent(1, "Zakończone", "20261125T150000", "20261125T160000", false),
-            vevent(2, "Trwa", "20261125T163000", "20261125T173000", false),
+            located(
+                vevent(2, "Trwa", "20261125T163000", "20261125T173000", false),
+                "Dom\\nul. Długa 1",
+            ),
             vevent(3, "Babcia", "20261126", "20261127", true),
             vevent(4, "Pianino", "20261126T171500", "20261126T181500", false),
             vevent(5, "Poza oknem", "20261202T100000", "20261202T110000", false),
@@ -624,14 +681,18 @@ mod tests {
         assert_eq!(c.heading, "TEN TYDZIEŃ");
         assert_eq!(c.days.len(), 2);
         assert_eq!(c.days[0].label, "Dziś");
+        assert!(c.days[0].today);
         assert_eq!(
             c.days[0].events,
             vec![EventLine {
                 time: "16:30".into(),
-                title: "Trwa".into()
+                title: "Trwa".into(),
+                location: Some("Dom".into()),
             }]
         );
         assert_eq!(c.days[1].label, "Jutro");
+        assert!(!c.days[1].today);
+        assert_eq!(c.days[1].events[0].location, None);
         assert_eq!(c.days[1].events[0].time, "cały dzień");
         assert_eq!(c.days[1].events[0].title, "Babcia");
         assert_eq!(c.days[1].events[1].time, "17:15");
@@ -662,23 +723,59 @@ mod tests {
         assert_eq!(c.days[0].events[0].title, "Obóz");
     }
 
-    #[test]
-    fn calendar_overflow_collapses_to_more_line() {
-        let events: Vec<String> = (0..13)
+    fn hourly_events(n: usize, location: Option<&str>) -> Vec<String> {
+        (0..n)
             .map(|i| {
-                vevent(
+                let ev = vevent(
                     i,
                     &format!("Wydarzenie {i}"),
                     &format!("20261126T{:02}0000", 8 + i),
                     &format!("20261126T{:02}3000", 8 + i),
                     false,
-                )
+                );
+                match location {
+                    Some(l) => located(ev, l),
+                    None => ev,
+                }
             })
-            .collect();
-        let c = cal_view(warsaw(2026, 11, 25, 7, 0), &events, 7);
-        let lines: usize = c.days.iter().map(|d| d.events.len()).sum();
-        assert_eq!(lines, 10);
-        assert_eq!(c.more.as_deref(), Some("+3 więcej"));
+            .collect()
+    }
+
+    fn shown(c: &CalendarCol) -> usize {
+        c.days.iter().map(|d| d.events.len()).sum()
+    }
+
+    #[test]
+    fn calendar_overflow_collapses_to_more_line() {
+        let now = warsaw(2026, 11, 25, 7, 0);
+        // Day band (28px) + 14 rows of 23px = 350px: fits the 370px column
+        // outright, and still fits beside a 15px stale note.
+        let c = cal_view(now, &hourly_events(14, None), 7);
+        assert_eq!((shown(&c), c.more), (14, None));
+        let stale = cal_view_fetched(now, &hourly_events(14, None), 7, Duration::hours(3));
+        assert!(stale.note.is_some());
+        assert_eq!((shown(&stale), stale.more), (14, None));
+        // 15 rows (373px) overflow; with 25px reserved for "+N więcej", 13 fit (327px).
+        let c = cal_view(now, &hourly_events(15, None), 7);
+        assert_eq!(shown(&c), 13);
+        assert_eq!(c.more.as_deref(), Some("+2 więcej"));
+    }
+
+    #[test]
+    fn locations_and_stale_note_take_room_from_the_budget() {
+        let now = warsaw(2026, 11, 25, 7, 0);
+        // Located rows are 39px. 8 fit outright (340px), even with the note.
+        let c = cal_view(now, &hourly_events(8, Some("Hala")), 7);
+        assert_eq!((shown(&c), c.more), (8, None));
+        let c = cal_view_fetched(now, &hourly_events(8, Some("Hala")), 7, Duration::hours(3));
+        assert_eq!((shown(&c), c.more), (8, None));
+        // 9 (379px) overflow: 345px budget fits 8, but the note leaves 330px for 7.
+        let c = cal_view(now, &hourly_events(9, Some("Hala")), 7);
+        assert_eq!(shown(&c), 8);
+        assert_eq!(c.more.as_deref(), Some("+1 więcej"));
+        let c = cal_view_fetched(now, &hourly_events(9, Some("Hala")), 7, Duration::hours(3));
+        assert_eq!(shown(&c), 7);
+        assert_eq!(c.more.as_deref(), Some("+2 więcej"));
     }
 
     #[test]
@@ -805,7 +902,7 @@ mod tests {
             "Jutro · 8:00–11:40"
         );
         let w = worst_case_view();
-        assert_eq!(w.calendar.more.as_deref(), Some("+3 więcej"));
+        assert_eq!(w.calendar.more.as_deref(), Some("+5 więcej"));
         assert!(w.calendar.note.is_some());
         assert_eq!(w.kids[0].featured.as_ref().unwrap().lessons.len(), 9);
         serde_json::to_string(&w).unwrap();
