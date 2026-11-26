@@ -84,12 +84,19 @@ mise run test    # Rust tests
 `target/preview/`; the screenshots in `docs/images/` come from there.
 
 Commits and pull request titles follow [Conventional Commits](https://www.conventionalcommits.org/).
-`feat` and `fix` changes open a release PR (version bump and `CHANGELOG.md`); merging it tags the
+`feat`, `fix` and `perf` changes open a release PR (version bump and `CHANGELOG.md`) via
+[release-please](https://github.com/googleapis/release-please); merging it tags the
 version, creates a GitHub release and publishes the image to
-`ghcr.io/bwilczynski/tablica` as `<version>` and `latest`. The release workflow needs the
-`RELEASE_PLZ_TOKEN` repository secret: a fine-grained PAT for this repository with Contents
-and Pull requests read/write (see [release-plz.toml](release-plz.toml) for recovering a
-release that failed after tagging).
+`ghcr.io/bwilczynski/tablica` as `<version>` and `latest`. Other types (`refactor`, `chore`,
+`docs`, ...) do not open one unless marked breaking (`!`). The release workflow needs the
+`RELEASE_PLZ_TOKEN` repository secret (historical name): a fine-grained PAT for this repository
+with Contents and Pull requests read/write, and possibly Issues read/write for the release labels.
+
+If a release fails after the tag was pushed, the image still publishes: create the missing
+release by hand from the existing tag, with that version's `CHANGELOG.md` section as notes
+(`gh release create vX.Y.Z --notes-file ...`). If the release PR is left labelled
+`autorelease: pending` after its release exists, relabel it `autorelease: tagged` so
+release-please does not retry it.
 
 ## License
 
