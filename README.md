@@ -25,3 +25,19 @@ configured once.
   or database.
 - **One container:** a single Rust binary, published as a multi-arch (amd64/arm64)
   Docker image.
+
+## Running
+
+Use the compose example in `contrib/docker/docker-compose.yaml`:
+
+1. Copy `config.sample.toml` to `./data/config.toml` and edit it. `./data` is mounted at
+   `/data` in the container and also holds the cache. It must be writable by uid 1000
+   (`sudo chown -R 1000:1000 data`).
+2. Put each secret in its own file under `./secrets/`, named as in the config
+   (`trmnl_kitchen_key`, `librus_kid1_password` and so on). Compose mounts them at
+   `/run/secrets/`.
+3. Run `docker compose -f contrib/docker/docker-compose.yaml up -d`. The server listens
+   on port 8080, and `/healthz` reports its state.
+
+To capture Librus fixtures from a real account, run
+`tablica capture librus --config <config> --secrets-dir <dir> --out <dir>`.
