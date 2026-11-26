@@ -75,10 +75,36 @@ To capture Librus fixtures from a real account, run
 
 ## Contributing
 
+The repository is a Cargo workspace:
+
+- `crates/core` (`tablica-core`): device API, rendering, polling, cache, config and
+  server. It knows nothing about any particular dashboard.
+- `crates/family` (`tablica-family`): the family dashboard.
+- `crates/homelab` (`tablica-homelab`): the homelab placeholder.
+- `crates/tablica`: the binary, which lists the dashboards in `entries()` in `main.rs`.
+
 ```sh
-mise run lint    # clippy and rustfmt
-mise run test    # Rust tests
+mise run lint    # clippy and rustfmt, whole workspace
+mise run test    # cargo test --workspace
 ```
+
+### Adding a dashboard
+
+1. Create `crates/<name>`, with a name of 5 to 7 lowercase letters. Copy `crates/homelab`
+   for the shape: `Cargo.toml`, a `build.rs` that embeds `templates/`, and `src/lib.rs`.
+   The name must be unique and not one of `timezone`, `base_url`, `listen`, `data_dir`,
+   `schedule` or `device`.
+2. Construct a `DashboardEntry` and implement `ParsedDashboard` and `Dashboard` from
+   `tablica-core`, and export an `entry()` function:
+   - parsing the `[<name>]` config section happens offline;
+   - `prepare` opens caches and clients, without touching the network;
+   - `spawn_pollers` runs after the server has bound its port;
+   - `health` returns sanitized JSON only (no secrets, no raw error text).
+3. Add the crate as a dependency of `crates/tablica` and add its `entry()` to `entries()`
+   in `crates/tablica/src/main.rs`.
+
+Caches for a new dashboard go under `data_dir/<name>/`. No release configuration is
+needed: releases cover the whole repository.
 
 `cargo test write_previews` renders the dashboards with sample data into
 `target/preview/`; the screenshots in `docs/images/` come from there.

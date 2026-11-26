@@ -538,3 +538,10 @@ seam comes first, so there is never a dependency cycle.
 - Pre-1.0 bump rules kept (feat → patch); `perf`-only releases accepted.
 - The release rehearsal of tags/events needs a disposable repository you
   authorize when the time comes, or is checked on the first real release.
+
+## Implementation notes
+
+- `config_tests`, `render_tests` and `capture_tests` live as `#[cfg(test)]` modules in
+  `crates/tablica/src/lib.rs`.
+- The family test helpers are behind a `test-support` feature of `tablica-family`.
+- Errors for malformed dashboard sections name the field but lose line and column.
