@@ -337,3 +337,260 @@ pub fn load(
         secrets,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::dashboard::{Dashboard, ParseResult, PrepareContext};
+
+    const UNSET_ENV: &str = "TABLICA_CORE_TEST_SURELY_UNSET";
+
+    struct Stub;
+
+    impl ParsedDashboard for Stub {
+        fn prepare(self: Box<Self>, _: &PrepareContext) -> anyhow::Result<Arc<dyn Dashboard>> {
+            unreachable!("config tests never prepare")
+        }
+    }
+
+    /// Active whenever its section is present.
+    fn parse_alpha(section: Option<&toml::Value>, _: &Secrets) -> ParseResult {
+        Ok(section.map(|_| Box::new(Stub) as Box<dyn ParsedDashboard>))
+    }
+
+    /// Never active.
+    fn parse_bravo(_: Option<&toml::Value>, _: &Secrets) -> ParseResult {
+        Ok(None)
+    }
+
+    fn entries() -> Vec<DashboardEntry> {
+        vec![
+            DashboardEntry {
+                name: "alpha",
+                parse: parse_alpha,
+            },
+            DashboardEntry {
+                name: "bravo",
+                parse: parse_bravo,
+            },
+        ]
+    }
+
+    const MINIMAL: &str = "timezone = \"Europe/Warsaw\"\nbase_url = \"http://x\"\n[alpha]\n";
+
+    fn device(extra: &str) -> String {
+        format!(
+            "{MINIMAL}\n[[device]]\nname = \"shed\"\nmac = \"aa-bb-cc-dd-ee-01\"\n\
+             api_key_secret = \"shed_key\"\ndashboard = \"alpha\"\n{extra}"
+        )
+    }
+
+    /// A secrets dir holding `shed_key`, and the result of loading `toml` against it.
+    fn load_str(toml: &str) -> (Result<Loaded, ConfigError>, tempfile::TempDir) {
+        load_with(toml, &entries())
+    }
+
+    fn load_with(
+        toml: &str,
+        entries: &[DashboardEntry],
+    ) -> (Result<Loaded, ConfigError>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("shed_key"), " shed-secret \n").unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, toml).unwrap();
+        (load(&path, dir.path(), entries), dir)
+    }
+
+    fn loaded(toml: &str) -> Loaded {
+        load_str(toml).0.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn err(toml: &str) -> ConfigError {
+        load_str(toml).0.err().expect("load should fail")
+    }
+
+    #[test]
+    fn invalid_entry_names_are_rejected_through_load() {
+        fn entry(name: &'static str) -> DashboardEntry {
+            DashboardEntry {
+                name,
+                parse: parse_bravo,
+            }
+        }
+        for bad in [
+            vec![entry("abcd")],
+            vec![entry("Alpha")],
+            vec![entry("device")],
+            vec![entry("alpha"), entry("alpha")],
+        ] {
+            let (result, _dir) = load_with(MINIMAL, &bad);
+            assert!(
+                matches!(result, Err(ConfigError::InvalidDashboardName { .. })),
+                "{:?}",
+                bad.iter().map(|e| e.name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn device_on_unregistered_dashboard_is_rejected() {
+        let toml = device("").replace("\"alpha\"", "\"gamma\"");
+        let e = err(&toml);
+        assert!(
+            matches!(&e, ConfigError::UnknownDashboard { device, dashboard }
+                if device == "shed" && dashboard == "gamma"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn device_on_inactive_dashboard_is_rejected() {
+        let e = err(&device("").replace("\"alpha\"", "\"bravo\""));
+        assert!(
+            matches!(&e, ConfigError::UnknownDashboard { dashboard, .. } if dashboard == "bravo"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn only_active_dashboards_are_loaded() {
+        let l = loaded(MINIMAL);
+        let names: Vec<_> = l.dashboards.iter().map(|d| d.name).collect();
+        assert_eq!(names, ["alpha"]);
+    }
+
+    #[test]
+    fn secret_file_is_trimmed_and_wins_over_env() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("k"), "  from-file\n").unwrap();
+        let s = Secrets::new(dir.path().to_owned());
+        // PATH is always set; the file must still win.
+        let got = s.resolve("owner", "key", Some("k"), Some("PATH")).unwrap();
+        assert_eq!(got, "from-file");
+    }
+
+    #[test]
+    fn missing_file_falls_back_to_trimmed_env() {
+        let s = Secrets::new(PathBuf::from("/nonexistent"));
+        let got = s
+            .resolve("owner", "key", Some("absent"), Some("PATH"))
+            .unwrap();
+        assert_eq!(got, std::env::var("PATH").unwrap().trim());
+    }
+
+    #[test]
+    fn unreadable_file_does_not_fall_back_to_env() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("k")).unwrap();
+        let s = Secrets::new(dir.path().to_owned());
+        let e = s
+            .resolve("device `shed`", "api_key", Some("k"), Some("PATH"))
+            .unwrap_err();
+        assert!(matches!(e, ConfigError::SecretIo { .. }), "{e}");
+        assert!(e.to_string().contains("device `shed`"), "{e}");
+    }
+
+    #[test]
+    fn secret_errors_name_their_owner() {
+        let s = Secrets::new(PathBuf::from("/nonexistent"));
+        let cases = [
+            (Some("absent"), None),
+            (Some("absent"), Some(UNSET_ENV)),
+            (None, Some(UNSET_ENV)),
+            (None, None),
+        ];
+        for (file, env) in cases {
+            let e = s.resolve("kid `Ann`", "login", file, env).unwrap_err();
+            assert!(e.to_string().starts_with("kid `Ann`: "), "{e}");
+        }
+        assert!(matches!(
+            s.resolve("o", "k", Some("absent"), Some(UNSET_ENV)),
+            Err(ConfigError::MissingSecret { .. })
+        ));
+        assert!(matches!(
+            s.resolve("o", "k", None, Some(UNSET_ENV)),
+            Err(ConfigError::UnsetEnv { .. })
+        ));
+        assert!(matches!(
+            s.resolve("o", "k", None, None),
+            Err(ConfigError::UnsetSecret { .. })
+        ));
+    }
+
+    #[test]
+    fn secrets_count_every_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("k"), "v").unwrap();
+        let s = Secrets::new(dir.path().to_owned());
+        assert_eq!(s.reads(), 0);
+        s.resolve("o", "k", Some("k"), None).unwrap();
+        let _ = s.resolve("o", "k", Some("absent"), None);
+        assert_eq!(s.reads(), 2);
+    }
+
+    #[test]
+    fn loader_reads_the_device_key_once_and_trims_it() {
+        let l = loaded(&device(""));
+        assert_eq!(l.config.devices[0].api_key, "shed-secret");
+        assert_eq!(l.secrets.reads(), 1);
+    }
+
+    #[test]
+    fn mac_is_normalized_or_rejected() {
+        assert_eq!(
+            loaded(&device("")).config.devices[0].mac,
+            "AA:BB:CC:DD:EE:01"
+        );
+        let e = err(&device("").replace("aa-bb-cc-dd-ee-01", "not-a-mac"));
+        assert!(
+            matches!(&e, ConfigError::InvalidMac { device, .. } if device == "shed"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn defaults_apply() {
+        let c = loaded(MINIMAL).config;
+        assert_eq!(c.listen, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(c.data_dir, Path::new("/data"));
+        assert_eq!(c.schedule.wake, NaiveTime::from_hms_opt(6, 0, 0).unwrap());
+        assert_eq!(c.schedule.sleep, NaiveTime::from_hms_opt(22, 0, 0).unwrap());
+        assert_eq!(c.schedule.refresh_minutes, 15);
+        assert!(c.devices.is_empty());
+        assert_eq!(
+            loaded(&device("")).config.devices[0].bit_depth,
+            BitDepth::Two
+        );
+    }
+
+    #[test]
+    fn bit_depth_one_two_and_invalid() {
+        let depth =
+            |v: u8| loaded(&device(&format!("bit_depth = {v}"))).config.devices[0].bit_depth;
+        assert_eq!(depth(1), BitDepth::One);
+        assert_eq!(depth(2), BitDepth::Two);
+        let e = err(&device("bit_depth = 3"));
+        assert!(
+            matches!(&e, ConfigError::InvalidBitDepth { value: 3, device } if device == "shed"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn device_debug_redacts_the_api_key() {
+        let l = loaded(&device(""));
+        let dev = &l.config.devices[0];
+        for dump in [
+            format!("{dev:?}"),
+            format!("{dev:#?}"),
+            format!("{:?}", l.config),
+        ] {
+            assert!(!dump.contains("shed-secret"), "{dump}");
+            assert!(dump.contains(REDACTED), "{dump}");
+            assert!(dump.contains("shed"), "{dump}");
+        }
+    }
+}

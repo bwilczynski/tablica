@@ -99,7 +99,6 @@ async fn main() -> anyhow::Result<()> {
             templates,
         } => {
             let loaded = load(&config, &secrets_dir)?;
-            let shutdown = shutdown_signal()?;
             let templates = match templates {
                 Some(dir) => TemplateSource::Dir(dir),
                 None => TemplateSource::Embedded,
@@ -108,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
                 templates,
                 stop_timeout: FETCHER_STOP_TIMEOUT,
             };
-            tablica_core::server::run(loaded, opts, shutdown).await?;
+            tablica_core::server::run(loaded, opts, shutdown_signal).await?;
         }
         Command::Capture {
             source:

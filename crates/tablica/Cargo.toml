@@ -27,4 +27,5 @@ tower.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 tempfile.workspace = true
+png.workspace = true
 toml.workspace = true
