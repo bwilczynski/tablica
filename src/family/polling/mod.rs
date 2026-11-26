@@ -100,6 +100,14 @@ pub fn spawn_family_pollers(
     }
 
     let planned = PlannedRuns::new(cfg.family.kids.len());
+    // Kids with nothing cached fetch at startup; reserve those times before any
+    // poller starts so kids with cached data keep their gap from them.
+    let empty: Vec<bool> = caches
+        .timetables
+        .iter()
+        .map(|c| c.get().is_none())
+        .collect();
+    planned.reserve_startup(Utc::now().with_timezone(&tz), &empty, &mut fresh_rng());
     for (index, kid) in cfg.family.kids.iter().enumerate() {
         let policy = TimetablePolicy::new(index, caches.clone(), planned.clone(), fresh_rng());
         let (kid, caches, urls) = (kid.clone(), caches.clone(), sources.librus.clone());
