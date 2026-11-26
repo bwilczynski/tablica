@@ -1,0 +1,34 @@
+# Put config.toml (see config.sample.toml) in ./data and one file per secret in
+# ./secrets, named as in the config. Then: docker compose up -d
+services:
+  tablica:
+    image: ghcr.io/bwilczynski/tablica:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    secrets:
+      - trmnl_kitchen_key
+      - trmnl_office_key
+      - icloud_ics_url
+      - librus_kid1_login
+      - librus_kid1_password
+      - librus_kid2_login
+      - librus_kid2_password
+
+secrets:
+  trmnl_kitchen_key:
+    file: ./secrets/trmnl_kitchen_key
+  trmnl_office_key:
+    file: ./secrets/trmnl_office_key
+  icloud_ics_url:
+    file: ./secrets/icloud_ics_url
+  librus_kid1_login:
+    file: ./secrets/librus_kid1_login
+  librus_kid1_password:
+    file: ./secrets/librus_kid1_password
+  librus_kid2_login:
+    file: ./secrets/librus_kid2_login
+  librus_kid2_password:
+    file: ./secrets/librus_kid2_password
