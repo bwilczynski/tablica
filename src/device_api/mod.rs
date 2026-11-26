@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use crate::cache::{SourceCache, is_stale};
-use crate::config::{BitDepth, Config, DashboardKind, Device};
+use crate::config::{BitDepth, Config, Device};
 use crate::dashboards::family::{self, FamilyInputs};
 use crate::dashboards::homelab;
+use crate::family::config::FamilyConfig;
 use crate::family::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
 use crate::render::Renderer;
 pub use images::ImageStore;
@@ -33,6 +34,8 @@ pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<Config>,
+    /// Interim: the family section beside `cfg` until Task 5 routes through dashboards.
+    pub family: Arc<FamilyConfig>,
     pub caches: Arc<FamilyCaches>,
     pub renderer: Arc<Renderer>,
     pub images: Arc<ImageStore>,
@@ -50,13 +53,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-fn dashboard_name(kind: DashboardKind) -> &'static str {
-    match kind {
-        DashboardKind::Family => "family",
-        DashboardKind::Homelab => "homelab",
-    }
-}
-
 fn depth_number(depth: BitDepth) -> u8 {
     match depth {
         BitDepth::One => 1,
@@ -65,46 +61,51 @@ fn depth_number(depth: BitDepth) -> u8 {
 }
 
 /// Renders a dashboard from the cached source data as of `now`. CPU-bound.
+// Interim: maps dashboard names to the two built-in renders until Task 5.
 pub fn render_dashboard(
     cfg: &Config,
+    family_cfg: &FamilyConfig,
     caches: &FamilyCaches,
     renderer: &Renderer,
-    kind: DashboardKind,
+    dashboard: &str,
     now: DateTime<Utc>,
     depth: BitDepth,
 ) -> anyhow::Result<Vec<u8>> {
-    match kind {
-        DashboardKind::Family => {
+    match dashboard {
+        "family" => {
             let calendar = caches.calendar.get();
             let weather = caches.weather.get();
             let timetables: Vec<_> = caches.timetables.iter().map(SourceCache::get).collect();
             let view = family::build(&FamilyInputs {
                 now: now.with_timezone(&cfg.timezone),
-                cfg: &cfg.family,
+                cfg: family_cfg,
                 calendar: calendar.as_ref(),
                 weather: weather.as_ref(),
                 timetables: timetables.iter().map(Option::as_ref).collect(),
             });
             renderer.render("family.html", &view, depth)
         }
-        DashboardKind::Homelab => renderer.render("homelab.html", &homelab::build(), depth),
+        "homelab" => renderer.render("homelab.html", &homelab::build(), depth),
+        other => anyhow::bail!("unknown dashboard `{other}`"),
     }
 }
 
 /// [`render_dashboard`] on the blocking pool, so a render never stalls the runtime.
 async fn render_blocking(
     state: &AppState,
-    kind: DashboardKind,
+    dashboard: &str,
     now: DateTime<Utc>,
     depth: BitDepth,
 ) -> anyhow::Result<Vec<u8>> {
-    let (cfg, caches, renderer) = (
+    let (cfg, family, caches, renderer) = (
         state.cfg.clone(),
+        state.family.clone(),
         state.caches.clone(),
         state.renderer.clone(),
     );
+    let dashboard = dashboard.to_owned();
     tokio::task::spawn_blocking(move || {
-        render_dashboard(&cfg, &caches, &renderer, kind, now, depth)
+        render_dashboard(&cfg, &family, &caches, &renderer, &dashboard, now, depth)
     })
     .await
     .context("render task failed")?
@@ -159,7 +160,7 @@ async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Response {
         "image_url": format!(
             "{}/preview/{}.png?depth={}",
             base_url(&state.cfg),
-            dashboard_name(device.dashboard),
+            device.dashboard,
             depth_number(device.bit_depth),
         ),
         "message": format!("tablica: {}", device.name),
@@ -189,11 +190,9 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
     );
 
     let now = (state.clock)();
-    let kind = device.dashboard;
-    let filename = match render_blocking(&state, kind, now, device.bit_depth).await {
-        Ok(png) => state
-            .images
-            .put(&device.name, dashboard_name(kind), png, now),
+    let dashboard = device.dashboard.as_str();
+    let filename = match render_blocking(&state, dashboard, now, device.bit_depth).await {
+        Ok(png) => state.images.put(&device.name, dashboard, png, now),
         Err(e) => {
             warn!(device = %device.name, "render failed: {e:#}");
             match state.images.latest(&device.name) {
@@ -213,7 +212,7 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
         }
     };
 
-    let switch_at = (kind == DashboardKind::Family).then_some(state.cfg.family.switch_at);
+    let switch_at = (dashboard == "family").then_some(state.family.switch_at);
     let rate = refresh_rate(
         now.with_timezone(&state.cfg.timezone),
         &state.cfg.schedule,
@@ -272,9 +271,9 @@ async fn preview(
     Path(file): Path<String>,
     Query(q): Query<PreviewQuery>,
 ) -> Response {
-    let kind = match file.as_str() {
-        "family.png" => DashboardKind::Family,
-        "homelab.png" => DashboardKind::Homelab,
+    let dashboard = match file.as_str() {
+        "family.png" => "family",
+        "homelab.png" => "homelab",
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let depth = match q.depth {
@@ -293,7 +292,7 @@ async fn preview(
             }
         },
     };
-    match render_blocking(&state, kind, now, depth).await {
+    match render_blocking(&state, dashboard, now, depth).await {
         Ok(png) => png_response(png),
         Err(e) => {
             warn!("preview render failed: {e:#}");
@@ -343,7 +342,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use crate::config::{BitDepth, DashboardKind, Device, Schedule};
+    use crate::config::{BitDepth, Device, Schedule};
     use crate::dashboards::test_support::{sample_inputs, time, warsaw};
     use crate::render::TemplateSource;
 
@@ -354,18 +353,12 @@ mod tests {
         state: AppState,
     }
 
-    fn device(
-        name: &str,
-        mac: &str,
-        key: &str,
-        dashboard: DashboardKind,
-        depth: BitDepth,
-    ) -> Device {
+    fn device(name: &str, mac: &str, key: &str, dashboard: &str, depth: BitDepth) -> Device {
         Device {
             name: name.into(),
             mac: mac.into(),
             api_key: key.into(),
-            dashboard,
+            dashboard: dashboard.into(),
             bit_depth: depth,
         }
     }
@@ -402,24 +395,24 @@ mod tests {
                     "kitchen",
                     "AA:BB:CC:DD:EE:01",
                     "kitchen-key",
-                    DashboardKind::Family,
+                    "family",
                     BitDepth::Two,
                 ),
                 device(
                     "office",
                     "AA:BB:CC:DD:EE:02",
                     "office-key",
-                    DashboardKind::Homelab,
+                    "homelab",
                     BitDepth::One,
                 ),
             ],
-            family: sample.cfg,
         };
         let fixed = now.with_timezone(&Utc);
         Fixture {
             _dir: dir,
             state: AppState {
                 cfg: Arc::new(cfg),
+                family: Arc::new(sample.cfg),
                 caches: Arc::new(caches),
                 renderer: Arc::new(Renderer::new(templates).unwrap()),
                 images: Arc::new(ImageStore::new()),

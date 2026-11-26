@@ -1,12 +1,16 @@
-use std::path::PathBuf;
+use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
-use tablica::config::Config;
+use tablica::config::{Config, Loaded};
+use tablica::dashboard::DashboardEntry;
 use tablica::device_api::{self, AppState, ImageStore};
 use tablica::family::FamilyCaches;
+use tablica::family::config::FamilyConfig;
+use tablica::family::dashboard::ParsedFamily;
 use tablica::render::{Renderer, TemplateSource};
 use tablica::scheduler::{self, Sources};
 use tokio::signal::unix::{SignalKind, signal};
@@ -14,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-const OPEN_METEO: &str = "https://api.open-meteo.com";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long shutdown waits for the fetch loops to stop.
@@ -73,6 +76,33 @@ fn init_logging() {
         .init();
 }
 
+fn entries() -> Vec<DashboardEntry> {
+    vec![
+        tablica::family::dashboard::entry(),
+        tablica::dashboards::homelab::entry(),
+    ]
+}
+
+/// Loads the config and takes the family dashboard's parsed section out of it.
+// Interim: removed once Task 5 serves through `Dashboard` and Task 6 types capture.
+fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<(Config, ParsedFamily)> {
+    let Loaded {
+        config: cfg,
+        dashboards,
+        ..
+    } = tablica::config::load(config, secrets_dir, &entries())
+        .with_context(|| format!("loading {}", config.display()))?;
+    let family = dashboards
+        .into_iter()
+        .find(|d| d.name == "family")
+        .context("family dashboard is not active")?;
+    let parsed: Box<dyn Any> = family.parsed;
+    let parsed = parsed
+        .downcast::<ParsedFamily>()
+        .map_err(|_| anyhow!("family entry did not parse to ParsedFamily"))?;
+    Ok((cfg, *parsed))
+}
+
 /// Installs SIGTERM and SIGINT handlers; the returned future resolves on the first.
 fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
     let mut term = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
@@ -85,9 +115,18 @@ fn shutdown_signal() -> anyhow::Result<impl Future<Output = ()>> {
     })
 }
 
-async fn serve(cfg: Config, templates: Option<PathBuf>) -> anyhow::Result<()> {
+async fn serve(
+    cfg: Config,
+    family: ParsedFamily,
+    templates: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
-    let caches = Arc::new(FamilyCaches::open(&cfg.data_dir, cfg.family.kids.len()));
+    let ParsedFamily {
+        cfg: family,
+        endpoints,
+    } = family;
+    let family: Arc<FamilyConfig> = Arc::new(family);
+    let caches = Arc::new(FamilyCaches::open(&cfg.data_dir, family.kids.len()));
     let source = match templates {
         Some(dir) => TemplateSource::Dir(dir),
         None => TemplateSource::Embedded,
@@ -101,18 +140,25 @@ async fn serve(cfg: Config, templates: Option<PathBuf>) -> anyhow::Result<()> {
         .context("building the http client")?;
     let sources = Sources {
         http,
-        weather_base: OPEN_METEO.to_owned(),
-        librus: Default::default(),
+        weather_base: endpoints.weather_base,
+        librus: endpoints.librus,
     };
     // Bind first: a bind failure under a restart loop must never trigger Librus logins.
     let listener = tokio::net::TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("binding {}", cfg.listen))?;
     let stop = CancellationToken::new();
-    let fetchers = scheduler::spawn_all(cfg.clone(), caches.clone(), sources, stop.clone());
+    let fetchers = scheduler::spawn_all(
+        cfg.clone(),
+        family.clone(),
+        caches.clone(),
+        sources,
+        stop.clone(),
+    );
 
     let app = device_api::router(AppState {
         cfg: cfg.clone(),
+        family,
         caches,
         renderer,
         images: Arc::new(ImageStore::new()),
@@ -154,9 +200,8 @@ async fn main() -> anyhow::Result<()> {
             secrets_dir,
             templates,
         } => {
-            let cfg = tablica::config::load(&config, &secrets_dir)
-                .with_context(|| format!("loading {}", config.display()))?;
-            serve(cfg, templates).await?;
+            let (cfg, family) = load(&config, &secrets_dir)?;
+            serve(cfg, family, templates).await?;
         }
         Command::Capture {
             source:
@@ -166,9 +211,8 @@ async fn main() -> anyhow::Result<()> {
                     out,
                 },
         } => {
-            let cfg = tablica::config::load(&config, &secrets_dir)
-                .with_context(|| format!("loading {}", config.display()))?;
-            tablica::sources::librus::capture(&cfg, &out).await?;
+            let (_, family) = load(&config, &secrets_dir)?;
+            tablica::sources::librus::capture(&family.cfg, &out).await?;
         }
     }
     Ok(())

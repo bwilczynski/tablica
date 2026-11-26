@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::family::FamilyCaches;
+use crate::family::config::FamilyConfig;
 use crate::polling::{IntervalPolicy, Outcome, run_poller};
 use crate::scheduler::{
     Sources, refresh_calendar_once, refresh_timetable_once, refresh_weather_once,
@@ -42,6 +43,7 @@ fn fresh_rng() -> StdRng {
 /// poller per kid. They run until `shutdown` is cancelled.
 pub fn spawn_family_pollers(
     cfg: Arc<Config>,
+    family: Arc<FamilyConfig>,
     caches: Arc<FamilyCaches>,
     sources: Sources,
     shutdown: CancellationToken,
@@ -50,7 +52,7 @@ pub fn spawn_family_pollers(
     let mut handles = Vec::new();
 
     {
-        let (cfg, caches, http) = (cfg.clone(), caches.clone(), sources.http.clone());
+        let (family, caches, http) = (family.clone(), caches.clone(), sources.http.clone());
         let policy = IntervalPolicy::new(CALENDAR_EVERY, INTERVAL_SPREAD, fresh_rng());
         handles.push(tokio::spawn(run_poller(
             "calendar".into(),
@@ -58,15 +60,11 @@ pub fn spawn_family_pollers(
             policy,
             shutdown.clone(),
             move || {
-                let (cfg, caches, http) = (cfg.clone(), caches.clone(), http.clone());
+                let (family, caches, http) = (family.clone(), caches.clone(), http.clone());
                 async move {
-                    let r = refresh_calendar_once(
-                        &http,
-                        &cfg.family.ics_url,
-                        &caches.calendar,
-                        Utc::now(),
-                    )
-                    .await;
+                    let r =
+                        refresh_calendar_once(&http, &family.ics_url, &caches.calendar, Utc::now())
+                            .await;
                     to_outcome(&r)
                 }
             },
@@ -74,7 +72,7 @@ pub fn spawn_family_pollers(
     }
 
     {
-        let (cfg, caches, src) = (cfg.clone(), caches.clone(), sources.clone());
+        let (family, caches, src) = (family.clone(), caches.clone(), sources.clone());
         let policy = IntervalPolicy::new(WEATHER_EVERY, INTERVAL_SPREAD, fresh_rng());
         handles.push(tokio::spawn(run_poller(
             "weather".into(),
@@ -82,13 +80,13 @@ pub fn spawn_family_pollers(
             policy,
             shutdown.clone(),
             move || {
-                let (cfg, caches, src) = (cfg.clone(), caches.clone(), src.clone());
+                let (family, caches, src) = (family.clone(), caches.clone(), src.clone());
                 async move {
                     let r = refresh_weather_once(
                         &src.http,
                         &src.weather_base,
-                        &cfg.family.weather,
-                        cfg.timezone,
+                        &family.weather,
+                        tz,
                         &caches.weather,
                         Utc::now(),
                     )
@@ -99,7 +97,7 @@ pub fn spawn_family_pollers(
         )));
     }
 
-    let planned = PlannedRuns::new(cfg.family.kids.len());
+    let planned = PlannedRuns::new(family.kids.len());
     // Kids with nothing cached fetch at startup; reserve those times before any
     // poller starts so kids with cached data keep their gap from them.
     let empty: Vec<bool> = caches
@@ -108,7 +106,7 @@ pub fn spawn_family_pollers(
         .map(|c| c.get().is_none())
         .collect();
     planned.reserve_startup(Utc::now().with_timezone(&tz), &empty, &mut fresh_rng());
-    for (index, kid) in cfg.family.kids.iter().enumerate() {
+    for (index, kid) in family.kids.iter().enumerate() {
         let policy = TimetablePolicy::new(index, caches.clone(), planned.clone(), fresh_rng());
         let (kid, caches, urls) = (kid.clone(), caches.clone(), sources.librus.clone());
         handles.push(tokio::spawn(run_poller(

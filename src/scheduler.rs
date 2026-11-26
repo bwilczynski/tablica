@@ -9,8 +9,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::cache::SourceCache;
-use crate::config::{Config, KidConfig};
+use crate::config::Config;
 use crate::family::FamilyCaches;
+use crate::family::config::{FamilyConfig, KidConfig};
 use crate::sources::SourceError;
 use crate::sources::calendar::{self, FetchOutcome, IcsSnapshot};
 use crate::sources::librus::timetable::{self, Timetable};
@@ -101,7 +102,7 @@ pub async fn refresh_calendar_once(
 pub async fn refresh_weather_once(
     http: &reqwest::Client,
     base_url: &str,
-    cfg: &crate::config::WeatherConfig,
+    cfg: &crate::family::config::WeatherConfig,
     tz: Tz,
     cache: &SourceCache<Weather>,
     now: DateTime<Utc>,
@@ -136,13 +137,15 @@ pub async fn refresh_timetable_once(
 
 /// Starts every fetch loop until `shutdown` is cancelled. Each dashboard
 /// brings its own pollers.
+// Interim: `family` is passed alongside `cfg` until Task 5 routes through dashboards.
 pub fn spawn_all(
     cfg: Arc<Config>,
+    family: Arc<FamilyConfig>,
     caches: Arc<FamilyCaches>,
     sources: Sources,
     shutdown: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
-    crate::family::polling::spawn_family_pollers(cfg, caches, sources, shutdown)
+    crate::family::polling::spawn_family_pollers(cfg, family, caches, sources, shutdown)
 }
 
 #[cfg(test)]
@@ -279,7 +282,7 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let cache = SourceCache::<Weather>::open(dir.path().join("weather.json"));
-        let cfg = crate::config::WeatherConfig {
+        let cfg = crate::family::config::WeatherConfig {
             latitude: 52.2,
             longitude: 21.0,
         };

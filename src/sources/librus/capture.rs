@@ -7,7 +7,7 @@ use anyhow::Context;
 
 use super::auth::{Exchange, LibrusClient, LibrusUrls};
 use super::timetable::{teacher_names, week_options};
-use crate::config::{Config, KidConfig};
+use crate::family::config::{FamilyConfig, KidConfig};
 
 const REDACTED: &str = "<redacted>";
 /// Cookie values shorter than this are only redacted in `Set-Cookie` headers, not
@@ -15,8 +15,8 @@ const REDACTED: &str = "<redacted>";
 const MIN_COOKIE_SCRUB_LEN: usize = 8;
 
 /// Captures fixtures from production Librus for every configured kid.
-pub async fn capture(cfg: &Config, out: &Path) -> anyhow::Result<()> {
-    capture_with_urls(cfg, out, &LibrusUrls::default()).await
+pub async fn capture(family: &FamilyConfig, out: &Path) -> anyhow::Result<()> {
+    capture_with_urls(family, out, &LibrusUrls::default()).await
 }
 
 /// Like [`capture`], against the given hosts.
@@ -25,12 +25,16 @@ pub async fn capture(cfg: &Config, out: &Path) -> anyhow::Result<()> {
 /// `kid{N}/timetable-current.html` / `timetable-next.html`. The login is replaced
 /// with `LOGIN`, cookie values with `<redacted>`, and the password (never sent back
 /// by Librus, but checked anyway) with `<redacted>`.
-pub async fn capture_with_urls(cfg: &Config, out: &Path, urls: &LibrusUrls) -> anyhow::Result<()> {
+pub async fn capture_with_urls(
+    family: &FamilyConfig,
+    out: &Path,
+    urls: &LibrusUrls,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !cfg.family.kids.is_empty(),
+        !family.kids.is_empty(),
         "no [[family.kid]] entries in the config"
     );
-    for (i, kid) in cfg.family.kids.iter().enumerate() {
+    for (i, kid) in family.kids.iter().enumerate() {
         let n = i + 1;
         let dir = out.join(format!("kid{n}"));
         capture_kid(kid, &dir, urls)
@@ -671,7 +675,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::config::{FamilyConfig, KidConfig, Schedule, WeatherConfig};
+    use crate::family::config::WeatherConfig;
     use crate::sources::librus::auth::tests::{Hosts, LOGIN, PASSWORD};
     use chrono::NaiveTime;
     use wiremock::matchers::{method, path};
@@ -679,31 +683,19 @@ mod tests {
 
     const COOKIE_VALUE: &str = "s3ss10n-c00kie-v4lue";
 
-    fn config() -> Config {
-        Config {
-            timezone: chrono_tz::Europe::Warsaw,
-            base_url: "http://x".into(),
-            listen: "127.0.0.1:0".parse().unwrap(),
-            data_dir: "/tmp".into(),
-            schedule: Schedule {
-                wake: NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
-                sleep: NaiveTime::from_hms_opt(22, 0, 0).unwrap(),
-                refresh_minutes: 15,
-            },
-            devices: vec![],
-            family: FamilyConfig {
-                switch_at: NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
-                calendar_days: 7,
-                ics_url: "http://x/cal.ics".into(),
-                kids: vec![KidConfig {
-                    label: "Kid 1".into(),
-                    librus_login: LOGIN.into(),
-                    librus_password: PASSWORD.into(),
-                }],
-                weather: WeatherConfig {
-                    latitude: 0.0,
-                    longitude: 0.0,
-                },
+    fn config() -> FamilyConfig {
+        FamilyConfig {
+            switch_at: NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
+            calendar_days: 7,
+            ics_url: "http://x/cal.ics".into(),
+            kids: vec![KidConfig {
+                label: "Kid 1".into(),
+                librus_login: LOGIN.into(),
+                librus_password: PASSWORD.into(),
+            }],
+            weather: WeatherConfig {
+                latitude: 0.0,
+                longitude: 0.0,
             },
         }
     }
