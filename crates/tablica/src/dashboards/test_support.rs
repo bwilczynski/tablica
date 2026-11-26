@@ -6,13 +6,13 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::{Europe::Warsaw, Tz};
 
 use super::family::{self, FamilyInputs, FamilyView};
-use crate::cache::Stamped;
 use crate::family::FamilyCaches;
 use crate::family::config::{FamilyConfig, KidConfig, WeatherConfig};
 use crate::sources::calendar::IcsSnapshot;
 use crate::sources::librus::timetable::{Lesson, Timetable};
 use crate::sources::weather::{Daily, HourlyPrecip, Weather};
 use crate::text::{Condition, PrecipKind};
+use tablica_core::cache::Stamped;
 
 /// Owned source data; borrow it as [`FamilyInputs`] with [`Sample::inputs`].
 pub(crate) struct Sample {

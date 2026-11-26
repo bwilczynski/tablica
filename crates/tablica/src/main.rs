@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tablica::config::Loaded;
-use tablica::dashboard::DashboardEntry;
 use tablica::family::dashboard::family_kids;
-use tablica::render::TemplateSource;
-use tablica::server::ServeOptions;
+use tablica_core::config::Loaded;
+use tablica_core::dashboard::DashboardEntry;
+use tablica_core::render::TemplateSource;
+use tablica_core::server::ServeOptions;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -76,7 +76,7 @@ fn entries() -> Vec<DashboardEntry> {
 }
 
 fn load(config: &Path, secrets_dir: &Path) -> anyhow::Result<Loaded> {
-    tablica::config::load(config, secrets_dir, &entries())
+    tablica_core::config::load(config, secrets_dir, &entries())
         .with_context(|| format!("loading {}", config.display()))
 }
 
@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
                 templates,
                 stop_timeout: FETCHER_STOP_TIMEOUT,
             };
-            tablica::server::run(loaded, opts, shutdown).await?;
+            tablica_core::server::run(loaded, opts, shutdown).await?;
         }
         Command::Capture {
             source:

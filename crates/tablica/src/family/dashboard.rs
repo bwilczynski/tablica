@@ -11,11 +11,6 @@ use serde_json::json;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::cache::{SourceCache, source_health};
-use crate::config::{Loaded, Secrets};
-use crate::dashboard::{
-    Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
-};
 use crate::dashboards::family::{self, FamilyInputs};
 use crate::family::config::{FamilyConfig, KidConfig, parse_config};
 use crate::family::polling::{
@@ -24,8 +19,13 @@ use crate::family::polling::{
 };
 use crate::family::refresh::{refresh_calendar_once, refresh_timetable_once, refresh_weather_once};
 use crate::family::{CALENDAR_MAX_AGE, FamilyCaches, TIMETABLE_MAX_AGE, WEATHER_MAX_AGE};
-use crate::polling::{IntervalPolicy, run_poller};
 use crate::sources::librus::LibrusUrls;
+use tablica_core::cache::{SourceCache, source_health};
+use tablica_core::config::{Loaded, Secrets};
+use tablica_core::dashboard::{
+    Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
+};
+use tablica_core::polling::{IntervalPolicy, run_poller};
 
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);

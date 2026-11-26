@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use rand::rngs::StdRng;
 
-use crate::polling::Outcome;
 use crate::sources::SourceError;
+use tablica_core::polling::Outcome;
 
 pub use timetable_policy::{PlannedRuns, TimetablePolicy};
 

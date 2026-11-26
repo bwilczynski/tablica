@@ -3243,6 +3243,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tablica-core",
  "takumi",
  "tempfile",
  "thiserror",
@@ -3253,6 +3254,33 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "tablica-core"
+version = "0.1.3"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "chrono-tz",
+ "http-body-util",
+ "image",
+ "minijinja",
+ "minijinja-autoreload",
+ "png",
+ "rand 0.10.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "takumi",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

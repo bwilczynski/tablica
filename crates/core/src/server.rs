@@ -43,7 +43,7 @@ pub async fn run(
     let renderer =
         Arc::new(Renderer::new(opts.templates, &dashboards).context("building the renderer")?);
 
-    // Bind first: a bind failure under a restart loop must never trigger Librus logins.
+    // Bind first: a bind failure under a restart loop must never start pollers.
     let listener = tokio::net::TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("binding {}", cfg.listen))?;

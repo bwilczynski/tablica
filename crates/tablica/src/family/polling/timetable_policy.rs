@@ -8,10 +8,10 @@ use chrono_tz::Tz;
 use rand::rngs::StdRng;
 
 use super::windows::{in_window, next_scheduled};
-use crate::cache::is_stale;
 use crate::family::{FamilyCaches, TIMETABLE_MAX_AGE};
-use crate::polling::{Outcome, PollPolicy, backoff_delay, between, jittered};
 use crate::sources::librus::timetable::Timetable;
+use tablica_core::cache::is_stale;
+use tablica_core::polling::{Outcome, PollPolicy, backoff_delay, between, jittered};
 
 /// Retries allowed after a failed run, per scheduled run.
 const MAX_RETRIES: u32 = 2;
@@ -142,7 +142,7 @@ impl TimetablePolicy {
         }
     }
 
-    fn timetable(&self) -> Option<crate::cache::Stamped<Timetable>> {
+    fn timetable(&self) -> Option<tablica_core::cache::Stamped<Timetable>> {
         self.caches.timetables.get(self.index).and_then(|c| c.get())
     }
 

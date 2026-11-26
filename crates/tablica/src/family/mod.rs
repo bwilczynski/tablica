@@ -12,10 +12,10 @@ use std::path::Path;
 
 use chrono::Duration;
 
-use crate::cache::SourceCache;
 use crate::sources::calendar::IcsSnapshot;
 use crate::sources::librus::timetable::Timetable;
 use crate::sources::weather::Weather;
+use tablica_core::cache::SourceCache;
 
 pub const CALENDAR_MAX_AGE: Duration = Duration::hours(2);
 pub const TIMETABLE_MAX_AGE: Duration = Duration::hours(26);
