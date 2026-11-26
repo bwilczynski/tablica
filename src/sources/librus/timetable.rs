@@ -120,7 +120,7 @@ pub fn parse_week(
         .into_iter()
         .find(|(_, selected)| *selected)
         .and_then(|(v, _)| NaiveDate::parse_from_str(v.get(..10)?, "%Y-%m-%d").ok())
-        .ok_or_else(|| SourceError::Parse("no selected week in the tydzien select".into()))?;
+        .ok_or_else(|| SourceError::Parse("no selected week in the tydzien select"))?;
 
     let (row, th, td, text, info) = (
         sel("table.plan-lekcji tr.line1"),
@@ -245,7 +245,7 @@ pub async fn fetch_two_weeks(
         .iter()
         .position(|(_, selected)| *selected)
         .and_then(|i| options.get(i + 1))
-        .ok_or_else(|| SourceError::Parse("no week option after the selected one".into()))?;
+        .ok_or_else(|| SourceError::Parse("no week option after the selected one"))?;
     let html = client.timetable_page(Some(&next.0)).await?;
     let (next_monday, next_days) = parse_week(&html)?;
     // If Librus ignored the selector it sends back another week; merging that
@@ -255,11 +255,9 @@ pub async fn fetch_two_weeks(
         .find(|(_, selected)| *selected)
         .map(|(v, _)| v);
     if selected.as_deref() != Some(next.0.as_str()) || next_monday == monday {
-        return Err(SourceError::Parse(format!(
-            "asked for week {} but got {}",
-            next.0,
-            selected.as_deref().unwrap_or("none")
-        )));
+        return Err(SourceError::Parse(
+            "Librus returned a different week than requested",
+        ));
     }
     days.extend(next_days);
     Ok(Timetable {
@@ -617,6 +615,11 @@ mod tests {
         let client = LibrusClient::new(h.urls());
         let err = fetch_two_weeks(&client, "l", "p").await.unwrap_err();
         assert!(matches!(err, SourceError::Parse(_)), "{err:?}");
-        assert!(err.to_string().contains("2026-11-30_2026-12-06"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("Librus returned a different week than requested"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("2026-11-30"), "{err}");
     }
 }

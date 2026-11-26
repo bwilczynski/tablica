@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::SourceError;
 use crate::family::config::WeatherConfig;
 use crate::text::{Condition, PrecipKind};
+use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Weather {
@@ -101,7 +102,15 @@ struct RawHourly {
 
 /// Parses an Open-Meteo forecast response.
 pub fn parse(json: &str) -> Result<Weather, SourceError> {
-    let raw: Raw = serde_json::from_str(json).map_err(|e| SourceError::Parse(e.to_string()))?;
+    let raw: Raw = serde_json::from_str(json).map_err(|e| {
+        debug!(
+            source = "weather",
+            line = e.line(),
+            column = e.column(),
+            "parse failed"
+        );
+        SourceError::Parse("forecast JSON does not match the expected shape")
+    })?;
     let d = &raw.daily;
     let day = |i: usize| -> Result<Daily, SourceError> {
         match (
@@ -112,17 +121,17 @@ pub fn parse(json: &str) -> Result<Weather, SourceError> {
         ) {
             (Some(time), Some(&code), Some(&max_c), Some(&min_c)) => Ok(Daily {
                 date: NaiveDate::parse_from_str(time, "%Y-%m-%d")
-                    .map_err(|e| SourceError::Parse(format!("bad daily date {time:?}: {e}")))?,
+                    .map_err(|_| SourceError::Parse("bad daily date"))?,
                 max_c,
                 min_c,
                 condition: condition_from_wmo(code),
             }),
-            _ => Err(SourceError::Parse(format!("missing daily entry {i}"))),
+            _ => Err(SourceError::Parse("missing daily entry")),
         }
     };
     let h = &raw.hourly;
     if h.precipitation_probability.len() != h.time.len() || h.weather_code.len() != h.time.len() {
-        return Err(SourceError::Parse("hourly arrays differ in length".into()));
+        return Err(SourceError::Parse("hourly arrays differ in length"));
     }
     let mut hourly = Vec::with_capacity(h.time.len());
     for ((time, prob), &code) in h
@@ -133,7 +142,7 @@ pub fn parse(json: &str) -> Result<Weather, SourceError> {
     {
         // Open-Meteo local times carry no seconds or offset.
         let at = NaiveDateTime::parse_from_str(time, "%Y-%m-%dT%H:%M")
-            .map_err(|e| SourceError::Parse(format!("bad hourly time {time:?}: {e}")))?;
+            .map_err(|_| SourceError::Parse("bad hourly time"))?;
         hourly.push(HourlyPrecip {
             at,
             probability: prob.unwrap_or(0.0).clamp(0.0, 100.0).round() as u8,

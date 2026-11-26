@@ -76,7 +76,7 @@ pub async fn refresh_calendar_once(
             None => Err(fail(
                 "calendar",
                 cache,
-                SourceError::Parse("304 without cached data".into()),
+                SourceError::Parse("304 without cached data"),
                 now,
             )),
         },
@@ -124,14 +124,16 @@ pub async fn refresh_timetable_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::test_logs::Logs;
     use chrono::TimeZone;
-    use wiremock::matchers::{header, method};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const WARSAW: Tz = chrono_tz::Europe::Warsaw;
 
     #[tokio::test]
     async fn errors_never_leak_the_calendar_url() {
+        let (logs, _guard) = Logs::capture();
         let dir = tempfile::tempdir().unwrap();
         let cache = calendar_cache(&dir);
         let url = "http://127.0.0.1:1/SECRETMARKER/cal.ics?token=SECRETMARKER";
@@ -143,6 +145,240 @@ mod tests {
         assert!(!recorded.contains("SECRETMARKER"), "{recorded}");
         assert!(!err.to_string().contains("SECRETMARKER"), "{err}");
         assert!(!format!("{err:?}").contains("SECRETMARKER"), "{err:?}");
+        assert!(!logs.text().contains("SECRETMARKER"), "{}", logs.text());
+    }
+
+    const SENTINEL: &str = "SECRETSENTINEL";
+
+    /// `err` and everything derived from it must be free of the sentinel.
+    fn assert_clean<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
+        err: SourceError,
+        cache: &SourceCache<T>,
+        logs: &Logs,
+    ) {
+        let rendered = [
+            err.to_string(),
+            format!("{err:?}"),
+            format!("{:#}", anyhow::anyhow!(err)),
+            cache.last_error().expect("error recorded").1,
+            crate::cache::source_health(cache, at(9), chrono::Duration::hours(1)).to_string(),
+            logs.text(),
+        ];
+        for text in rendered {
+            assert!(!text.contains(SENTINEL), "{text}");
+        }
+    }
+
+    // The parser is lenient: a stray line like `{SENTINEL}-line` is accepted, but
+    // a mismatched `END:{SENTINEL}` makes its diagnostic quote that line.
+    #[tokio::test]
+    async fn malformed_ics_never_leaks_its_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "BEGIN:VCALENDAR\nBEGIN:VEVENT\nEND:{SENTINEL}\nEND:VCALENDAR\n"
+            )))
+            .mount(&server)
+            .await;
+        let (logs, _guard) = Logs::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = calendar_cache(&dir);
+        let err = refresh_calendar_once(&reqwest::Client::new(), &server.uri(), &cache, at(9))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SourceError::Parse(_)), "{err:?}");
+        assert!(logs.text().contains("refresh failed"), "{}", logs.text());
+        assert_clean(err, &cache, &logs);
+    }
+
+    #[tokio::test]
+    async fn malformed_forecast_never_leaks_its_content() {
+        let shapes = [
+            // Wrong type where a number belongs.
+            format!(r#"{{"current": "{SENTINEL}"}}"#),
+            // Right shape, unparsable dates.
+            format!(
+                r#"{{"current": {{"temperature_2m": 1.0, "weather_code": 3}},
+                    "daily": {{"time": ["{SENTINEL}", "x"], "weather_code": [3, 3],
+                               "temperature_2m_max": [1.0, 1.0], "temperature_2m_min": [0.0, 0.0]}},
+                    "hourly": {{"time": [], "precipitation_probability": [], "weather_code": []}}}}"#
+            ),
+            format!(
+                r#"{{"current": {{"temperature_2m": 1.0, "weather_code": 3}},
+                    "daily": {{"time": ["2026-01-05", "2026-01-06"], "weather_code": [3, 3],
+                               "temperature_2m_max": [1.0, 1.0], "temperature_2m_min": [0.0, 0.0]}},
+                    "hourly": {{"time": ["{SENTINEL}"], "precipitation_probability": [1.0], "weather_code": [3]}}}}"#
+            ),
+        ];
+        for body in shapes {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+            let (logs, _guard) = Logs::capture();
+            let dir = tempfile::tempdir().unwrap();
+            let cache = SourceCache::<Weather>::open(dir.path().join("weather.json"));
+            let cfg = crate::family::config::WeatherConfig {
+                latitude: 52.2,
+                longitude: 21.0,
+            };
+            let err = refresh_weather_once(
+                &reqwest::Client::new(),
+                &server.uri(),
+                &cfg,
+                WARSAW,
+                &cache,
+                at(9),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, SourceError::Parse(_)), "{err:?}");
+            assert_clean(err, &cache, &logs);
+        }
+    }
+
+    /// Mounts steps 1 and 2 with the sentinel in the paths the responses point
+    /// to: portalRodzina → `{api}/OAuth/Authorization/{SENTINEL}` → login form at
+    /// `/OAuth/Authorization/{SENTINEL}/form`, where the credentials POST goes.
+    async fn mount_sentinel_entry(h: &crate::sources::librus::auth::tests::Hosts) {
+        Mock::given(method("GET"))
+            .and(path("/loguj/portalRodzina"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!(
+                    "{}/OAuth/Authorization/{SENTINEL}?response_type=code",
+                    h.api.uri()
+                ),
+            ))
+            .mount(&h.synergia)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/OAuth/Authorization/{SENTINEL}")))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "Location",
+                format!("/OAuth/Authorization/{SENTINEL}/form?client_id=46"),
+            ))
+            .mount(&h.api)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/OAuth/Authorization/{SENTINEL}/form")))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<form></form>"))
+            .mount(&h.api)
+            .await;
+    }
+
+    /// The credentials POST answers with `response`.
+    async fn mount_sentinel_post(
+        h: &crate::sources::librus::auth::tests::Hosts,
+        response: ResponseTemplate,
+    ) {
+        Mock::given(method("POST"))
+            .and(path(format!("/OAuth/Authorization/{SENTINEL}/form")))
+            .respond_with(response)
+            .mount(&h.api)
+            .await;
+    }
+
+    async fn refresh_kid(
+        h: &crate::sources::librus::auth::tests::Hosts,
+        dir: &tempfile::TempDir,
+    ) -> (SourceError, SourceCache<Timetable>) {
+        let cache = SourceCache::<Timetable>::open(dir.path().join("timetable-kid1.json"));
+        let kid = KidConfig {
+            label: "Kid".into(),
+            librus_login: "login".into(),
+            librus_password: "password".into(),
+        };
+        let err = refresh_timetable_once(&h.urls(), &kid, &cache, at(9))
+            .await
+            .unwrap_err();
+        (err, cache)
+    }
+
+    // Hosts and paths taken from Location headers and the JSON `goTo` are
+    // response-derived: they reach neither errors, the cache, health nor logs.
+    #[tokio::test]
+    async fn librus_response_urls_never_leak() {
+        use crate::sources::librus::auth::tests::Hosts;
+
+        // A rejected login at a login form whose path came from a redirect.
+        let h = Hosts::start().await;
+        mount_sentinel_entry(&h).await;
+        mount_sentinel_post(&h, ResponseTemplate::new(403)).await;
+        let (logs, _guard) = Logs::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let (err, cache) = refresh_kid(&h, &dir).await;
+        assert!(
+            matches!(err, SourceError::CredentialsRejected(_)),
+            "{err:?}"
+        );
+        assert!(logs.text().contains("librus login"), "{}", logs.text());
+        assert_clean(err, &cache, &logs);
+        drop(_guard);
+
+        // A JSON rejection with the same response-derived login form.
+        let h = Hosts::start().await;
+        mount_sentinel_entry(&h).await;
+        mount_sentinel_post(
+            &h,
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "error"})),
+        )
+        .await;
+        let (logs, _guard) = Logs::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let (err, cache) = refresh_kid(&h, &dir).await;
+        assert!(
+            matches!(err, SourceError::CredentialsRejected(_)),
+            "{err:?}"
+        );
+        assert_clean(err, &cache, &logs);
+        drop(_guard);
+
+        // A `goTo` to a foreign host with the sentinel in host and path.
+        let h = Hosts::start().await;
+        mount_sentinel_entry(&h).await;
+        mount_sentinel_post(
+            &h,
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "goTo": format!("http://{SENTINEL}.example/{SENTINEL}/next")
+            })),
+        )
+        .await;
+        let (logs, _guard) = Logs::capture();
+        let dir = tempfile::tempdir().unwrap();
+        let (err, cache) = refresh_kid(&h, &dir).await;
+        assert!(matches!(err, SourceError::Auth(_)), "{err:?}");
+        assert_clean(err, &cache, &logs);
+        drop(_guard);
+
+        // A Location continuation on the allowed host that then fails, and one
+        // that runs out of hops.
+        for (hop_status, hop_location) in [(500, None), (302, Some("./loop"))] {
+            let h = Hosts::start().await;
+            mount_sentinel_entry(&h).await;
+            mount_sentinel_post(
+                &h,
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("/OAuth/Authorization/{SENTINEL}/loop")),
+            )
+            .await;
+            let mut hop = ResponseTemplate::new(hop_status);
+            if let Some(loc) = hop_location {
+                hop = hop.insert_header("Location", loc);
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/OAuth/Authorization/{SENTINEL}/loop")))
+                .respond_with(hop)
+                .mount(&h.api)
+                .await;
+            let (logs, _guard) = Logs::capture();
+            let dir = tempfile::tempdir().unwrap();
+            let (err, cache) = refresh_kid(&h, &dir).await;
+            assert!(matches!(err, SourceError::Auth(_)), "{err:?}");
+            assert_clean(err, &cache, &logs);
+        }
     }
 
     fn at(h: u32) -> DateTime<Utc> {

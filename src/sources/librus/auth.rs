@@ -92,16 +92,9 @@ fn random_unit() -> f64 {
     (bits >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// `host[:port]/path` of a URL, for errors and logs. Never includes the query,
-/// which carries OAuth state.
-fn describe(url: &Url) -> String {
-    let host = url.host_str().unwrap_or("?");
-    match url.port() {
-        Some(port) => format!("{host}:{port}{}", url.path()),
-        None => format!("{host}{}", url.path()),
-    }
-}
-
+/// Auth errors and logs carry only the fixed step, a fixed reason and the numeric
+/// HTTP status. Hops after the first come from `Location` headers or the JSON
+/// `goTo`, so no URL (host, path or query) ever goes into them.
 fn auth(step: &str, msg: String) -> SourceError {
     SourceError::Auth(format!("{step}: {msg}"))
 }
@@ -196,12 +189,7 @@ impl LibrusClient {
         req: RequestBuilder,
         trace: &mut Trace<'_>,
     ) -> Result<Page, SourceError> {
-        let fail = |e: reqwest::Error| {
-            auth(
-                step,
-                format!("request to {} failed: {}", describe(url), e.without_url()),
-            )
-        };
+        let fail = |e: reqwest::Error| auth(step, format!("request failed: {}", e.without_url()));
         let resp = req.send().await.map_err(fail)?;
         let status = resp.status().as_u16();
         let headers: Vec<(String, String)> = resp
@@ -220,7 +208,7 @@ impl LibrusClient {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         let body = resp.text().await.map_err(fail)?;
-        tracing::debug!(step, method, url = %describe(url), status, "librus login");
+        tracing::debug!(step, method, status, "librus login");
         if let Some(t) = trace.as_deref_mut() {
             t.push(Exchange {
                 method: method.to_owned(),
@@ -260,20 +248,13 @@ impl LibrusClient {
             _ => {
                 return Err(auth(
                     step,
-                    format!(
-                        "expected a redirect, got status {} at {}",
-                        page.status,
-                        describe(url)
-                    ),
+                    format!("expected a redirect, got status {}", page.status),
                 ));
             }
         };
         let next = resolve(step, url, location)?;
         if !self.is_api_authorization(&next) {
-            return Err(auth(
-                step,
-                format!("unexpected redirect: {}", describe(&next)),
-            ));
+            return Err(auth(step, "unexpected redirect target".to_owned()));
         }
         Ok(next)
     }
@@ -304,10 +285,7 @@ impl LibrusClient {
             .await?;
         // Any status below 400 is fine here, as upstream accepts.
         if !(200..400).contains(&page.status) {
-            return Err(auth(
-                STEP2_FORM,
-                format!("status {} at {}", page.status, describe(&login_url)),
-            ));
+            return Err(auth(STEP2_FORM, format!("status {}", page.status)));
         }
 
         // 3. Submit the credentials with the headers the browser sends.
@@ -326,35 +304,23 @@ impl LibrusClient {
         // so the scheduler never retries it within a slot.
         if (400..500).contains(&page.status) {
             return Err(SourceError::CredentialsRejected(format!(
-                "{STEP3}: status {} at {}",
-                page.status,
-                describe(&login_url)
+                "{STEP3}: status {}",
+                page.status
             )));
         }
         if page.status >= 500 {
-            return Err(auth(
-                STEP3,
-                format!("status {} at {}", page.status, describe(&login_url)),
-            ));
+            return Err(auth(STEP3, format!("status {}", page.status)));
         }
         let next = page.location.clone().or_else(|| json_goto(&page.body));
         // A 200 with an error in the body is a rejection too. The body's own text
         // is never logged: a fixed message is enough to act on.
         if next.is_none() && json_login_error(&page.body) {
             return Err(SourceError::CredentialsRejected(format!(
-                "{STEP3}: login reported an error at {}",
-                describe(&login_url)
+                "{STEP3}: login reported an error"
             )));
         }
-        let next = next.ok_or_else(|| {
-            auth(
-                STEP3,
-                format!(
-                    "no continuation (Location or goTo) from {}",
-                    describe(&login_url)
-                ),
-            )
-        })?;
+        let next =
+            next.ok_or_else(|| auth(STEP3, "no continuation (Location or goTo)".to_owned()))?;
         let next = resolve(STEP3, &login_url, &next)?;
 
         // 4–6. Follow the continuation by hand, checking every hop.
@@ -372,10 +338,7 @@ impl LibrusClient {
                 return Ok(());
             }
             if !self.is_chain(&next) {
-                return Err(auth(
-                    STEP4,
-                    format!("unexpected redirect: {}", describe(&next)),
-                ));
+                return Err(auth(STEP4, "unexpected redirect target".to_owned()));
             }
             let page = self.get(STEP4, &next, &referer, trace).await?;
             if page.is_success() {
@@ -387,23 +350,14 @@ impl LibrusClient {
                     referer = std::mem::replace(&mut next, hop);
                 }
                 _ => {
-                    return Err(auth(
-                        STEP4,
-                        format!("status {} at {}", page.status, describe(&next)),
-                    ));
+                    return Err(auth(STEP4, format!("status {}", page.status)));
                 }
             }
         }
         if self.is_landing(&next) {
             return Ok(());
         }
-        Err(auth(
-            STEP4,
-            format!(
-                "more than {MAX_HOPS} redirects, last to {}",
-                describe(&next)
-            ),
-        ))
+        Err(auth(STEP4, format!("more than {MAX_HOPS} redirects")))
     }
 
     /// A timetable page. `None` is the current week (`GET`); `Some(v)` posts the
@@ -428,12 +382,8 @@ impl LibrusClient {
 
 /// Resolves a `Location`/`goTo` value against the URL that returned it.
 fn resolve(step: &str, base: &Url, location: &str) -> Result<Url, SourceError> {
-    base.join(location).map_err(|_| {
-        auth(
-            step,
-            format!("invalid redirect location from {}", describe(base)),
-        )
-    })
+    base.join(location)
+        .map_err(|_| auth(step, "invalid redirect location".to_owned()))
 }
 
 #[cfg(test)]
@@ -661,19 +611,24 @@ pub(crate) mod tests {
         assert!(matches!(err, SourceError::Auth(_)), "{err}");
         let msg = err.to_string();
         assert!(
-            msg.contains("unexpected redirect: evil.example/steal"),
+            msg.contains("step 4 (continuation): unexpected redirect target"),
             "{msg}"
         );
-        assert!(!msg.contains("token"), "{msg}");
+        // The target came from the response: none of it is quoted.
+        assert!(
+            !msg.contains("evil") && !msg.contains("steal") && !msg.contains("token"),
+            "{msg}"
+        );
 
         // The right host but a path outside the allowed chain is rejected too.
         let h = Hosts::start().await;
         h.mount_entry().await;
         h.mount_post_redirect("/OAuth/Other").await;
         let err = client(&h).login(LOGIN, PASSWORD, None).await.unwrap_err();
+        assert!(matches!(err, SourceError::Auth(_)), "{err}");
         assert!(
-            err.to_string().contains("unexpected redirect:")
-                && err.to_string().contains("/OAuth/Other"),
+            err.to_string().contains("unexpected redirect target")
+                && !err.to_string().contains("/OAuth/Other"),
             "{err}"
         );
     }
