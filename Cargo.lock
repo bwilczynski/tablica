@@ -3236,6 +3236,7 @@ dependencies = [
  "minijinja-autoreload",
  "minijinja-embed",
  "png",
+ "rand 0.10.4",
  "reqwest",
  "rrule",
  "scraper",

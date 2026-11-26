@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use crate::cache::{Caches, SourceCache};
 use crate::config::{Config, KidConfig};
+use crate::polling::backoff_delay;
 use crate::sources::SourceError;
 use crate::sources::calendar::{self, FetchOutcome, IcsSnapshot};
 use crate::sources::librus::timetable::{self, Timetable};
@@ -19,8 +20,6 @@ use crate::sources::weather::{self, Weather};
 
 const CALENDAR_EVERY: Duration = Duration::from_secs(15 * 60);
 const WEATHER_EVERY: Duration = Duration::from_secs(30 * 60);
-const BACKOFF_BASE_MINUTES: u64 = 5;
-const BACKOFF_CAP_MINUTES: u64 = 60;
 /// Local hours of the Librus slots, each at :30.
 const SLOT_HOURS: [u32; 9] = [5, 7, 9, 11, 13, 15, 17, 19, 21];
 
@@ -52,15 +51,6 @@ pub fn next_librus_slot(now: DateTime<Tz>) -> DateTime<Tz> {
 fn slot_at(tz: Tz, date: NaiveDate, hour: u32) -> Option<DateTime<Tz>> {
     tz.from_local_datetime(&date.and_hms_opt(hour, 30, 0)?)
         .earliest()
-}
-
-/// 5 min x 2^attempt, capped at 60 min.
-pub fn backoff_delay(attempt: u32) -> Duration {
-    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
-    let minutes = BACKOFF_BASE_MINUTES
-        .saturating_mul(factor)
-        .min(BACKOFF_CAP_MINUTES);
-    Duration::from_secs(minutes * 60)
 }
 
 /// An error message that is safe to log: reqwest errors embed the request URL,
@@ -340,18 +330,6 @@ mod tests {
         assert_eq!(next, local(2026, 3, 29, 5, 30));
         assert_eq!(next.to_rfc3339(), "2026-03-29T05:30:00+02:00");
         assert_eq!((next.hour(), next.minute()), (5, 30));
-    }
-
-    #[test]
-    fn backoff_caps_at_60_min() {
-        let mins = |n| backoff_delay(n).as_secs() / 60;
-        assert_eq!(mins(0), 5);
-        assert_eq!(mins(1), 10);
-        assert_eq!(mins(2), 20);
-        assert_eq!(mins(3), 40);
-        assert_eq!(mins(4), 60);
-        assert_eq!(mins(5), 60);
-        assert_eq!(mins(500), 60);
     }
 
     const FAIL: Result<(), SourceError> = Err(SourceError::Status(500));
