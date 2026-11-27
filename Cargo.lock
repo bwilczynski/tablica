@@ -3288,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "tablica"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -3312,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "tablica-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "tablica-family"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "tablica-homelab"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
