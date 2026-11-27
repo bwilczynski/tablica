@@ -1,6 +1,7 @@
 //! Config loading: one TOML file plus secrets resolved from files or environment.
 //! Core parses the globals and devices; each dashboard parses its own section.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,6 +49,14 @@ pub enum ConfigError {
     Dashboard { section: String, message: String },
     #[error("device `{device}`: unknown or inactive dashboard `{dashboard}`")]
     UnknownDashboard { device: String, dashboard: String },
+    #[error("device `{device}` is configured more than once")]
+    DuplicateDevice { device: String },
+    #[error("devices `{first}` and `{second}` have the same MAC address {mac}")]
+    DuplicateMac {
+        mac: String,
+        first: String,
+        second: String,
+    },
     #[error("dashboard name `{name}` {reason}")]
     InvalidDashboardName { name: String, reason: &'static str },
 }
@@ -300,6 +309,26 @@ pub fn load(
         })
         .collect::<Result<Vec<_>, ConfigError>>()?;
 
+    let mut seen = HashSet::new();
+    for device in &devices {
+        if !seen.insert(device.name.as_str()) {
+            return Err(ConfigError::DuplicateDevice {
+                device: device.name.clone(),
+            });
+        }
+    }
+    // History is keyed by MAC, and lookups by MAC take the first match.
+    let mut macs = HashMap::new();
+    for device in &devices {
+        if let Some(first) = macs.insert(device.mac.as_str(), device.name.as_str()) {
+            return Err(ConfigError::DuplicateMac {
+                mac: device.mac.clone(),
+                first: first.to_owned(),
+                second: device.name.clone(),
+            });
+        }
+    }
+
     let mut dashboards = Vec::new();
     for entry in entries {
         if let Some(parsed) = (entry.parse)(table.get(entry.name), &secrets)? {
@@ -433,6 +462,35 @@ mod tests {
                 bad.iter().map(|e| e.name).collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn duplicate_device_names_are_rejected() {
+        let toml = device("").replace("name = \"shed\"", "name = \"kitchen\"");
+        let second = "\n[[device]]\nname = \"kitchen\"\nmac = \"aa-bb-cc-dd-ee-02\"\n\
+                      api_key_secret = \"shed_key\"\ndashboard = \"alpha\"\n";
+        let e = err(&format!("{toml}{second}"));
+        assert!(
+            matches!(&e, ConfigError::DuplicateDevice { device } if device == "kitchen"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn duplicate_macs_are_rejected() {
+        // Spelled differently, the same MAC once normalized.
+        let second = "\n[[device]]\nname = \"porch\"\nmac = \"AA:BB:CC:DD:EE:01\"\n\
+                      api_key_secret = \"shed_key\"\ndashboard = \"alpha\"\n";
+        let e = err(&device(second));
+        assert!(
+            matches!(&e, ConfigError::DuplicateMac { mac, first, second }
+                if mac == "AA:BB:CC:DD:EE:01" && first == "shed" && second == "porch"),
+            "{e}"
+        );
+        assert_eq!(
+            e.to_string(),
+            "devices `shed` and `porch` have the same MAC address AA:BB:CC:DD:EE:01"
+        );
     }
 
     #[test]
