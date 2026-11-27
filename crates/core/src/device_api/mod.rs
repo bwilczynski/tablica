@@ -101,6 +101,14 @@ fn authenticate<'a>(cfg: &'a Config, headers: &HeaderMap) -> Option<&'a Device> 
     cfg.devices.iter().find(|d| d.api_key == token)
 }
 
+/// The configured device with this MAC (any case or separators), if any.
+fn device_by_mac<'a>(cfg: &'a Config, mac: &str) -> Option<&'a Device> {
+    let wanted = mac_key(mac);
+    (!wanted.is_empty())
+        .then(|| cfg.devices.iter().find(|d| mac_key(&d.mac) == wanted))
+        .flatten()
+}
+
 fn base_url(cfg: &Config) -> &str {
     cfg.base_url.trim_end_matches('/')
 }
@@ -111,11 +119,7 @@ fn png_response(png: Vec<u8>) -> Response {
 
 async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let mac = header_str(&headers, "ID").unwrap_or_default();
-    let wanted = mac_key(mac);
-    let device = (!wanted.is_empty())
-        .then(|| state.cfg.devices.iter().find(|d| mac_key(&d.mac) == wanted))
-        .flatten();
-    let Some(device) = device else {
+    let Some(device) = device_by_mac(&state.cfg, mac) else {
         warn!(mac, "setup from unknown device");
         return (
             StatusCode::NOT_FOUND,
@@ -142,7 +146,14 @@ async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Response {
 
 async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(device) = authenticate(&state.cfg, &headers) else {
-        warn!("display request with an unknown access token");
+        // The MAC tells a configured device holding a stale key (e.g. one issued by
+        // another server) apart from a stranger. The token itself is never logged.
+        let mac = header_str(&headers, "ID").unwrap_or_default();
+        let configured = device_by_mac(&state.cfg, mac).map_or("-", |d| d.name.as_str());
+        warn!(
+            mac,
+            configured, "display request with an unknown access token"
+        );
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"status": 500, "error": "Device not found", "reset_firmware": false})),
