@@ -48,9 +48,28 @@ configured once.
 - **Battery-friendly:** refreshes every 15 minutes between wake and sleep times, wakes
   just after `switch_at` so the switch shows up on time, and sleeps through the night.
 - **Configured, not managed:** one config file, secrets kept in files, and no admin UI
-  or database.
+  and no database server.
 - **One container:** a single Rust binary, published as a multi-arch (amd64/arm64)
   Docker image.
+
+### Diagnostics
+
+Each device has a diagnostics screen: battery level and drain estimate, Wi-Fi signal,
+the last reset that was not a normal wake, the last device log, and a section from its
+dashboard (for the family dashboard, how fresh each source is).
+
+- **What is recorded:** the telemetry headers each device sends with `/api/display`
+  (battery voltage, RSSI, wake time, reset reason, firmware and so on) and the log bodies
+  it posts to `/api/log`. Recording never changes or delays a device reply.
+- **Storage:** a SQLite file at `data_dir/history.db`. Readings and logs are kept for 90
+  days, and at most 2,000 log rows and 20,000 readings per device. The file does not
+  shrink: it stays at its high-water mark, and freed space is reused. If the file is
+  corrupt it is set aside as `history.db.corrupt-*` (the newest 3 sets are kept) and a
+  fresh one is started. Any other problem (or a fresh file that fails too) disables
+  history: the screen says history is unavailable and the server carries on.
+- **Browser access:** `/preview/diag.png?device=<name>` renders the screen as a PNG, with
+  optional `depth=1` or `2` and an RFC 3339 `at=` to see the history as of an earlier
+  moment. The dashboard's sections are always current, whatever `at` says.
 
 ### Planned
 
@@ -100,7 +119,10 @@ mise run test    # cargo test --workspace
    - `prepare` opens caches and clients, without touching the network;
    - `spawn_pollers` runs after the server has bound its port;
    - `health` returns sanitized JSON only (no secrets, no raw error text).
-3. Add the crate as a dependency of `crates/tablica` and add its `entry()` to `entries()`
+3. Optionally override `Dashboard::diagnostics` to list what the dashboard knows about
+   its sources on the diagnostics screen. Use `diagnostics::source_row` to turn a source's
+   cache into a row with its age and status.
+4. Add the crate as a dependency of `crates/tablica` and add its `entry()` to `entries()`
    in `crates/tablica/src/main.rs`.
 
 Caches for a new dashboard go under `data_dir/<name>/`. No release configuration is
