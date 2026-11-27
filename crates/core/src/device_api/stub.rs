@@ -1,6 +1,7 @@
 //! A minimal dashboard for core tests: one inline template, counters, no data.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, NaiveTime, Utc};
@@ -10,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::dashboard::{Dashboard, View};
+use crate::diagnostics::Section;
 
 /// Shows its name and the render time, so renders at different times differ.
 const TEMPLATE: &str = r#"<div style="width: 800px; height: 480px; background: white; color: black; font-family: Inter; font-size: 48px;"><p>{{ name }}</p><p>{{ now }}</p></div>"#;
@@ -21,6 +23,8 @@ pub struct StubDashboard {
     /// How many times `spawn_pollers` was called.
     pub spawned: AtomicUsize,
     pub switch_at: Option<NaiveTime>,
+    /// The `now` of the last `diagnostics` call.
+    pub diag_now: Mutex<Option<DateTime<Utc>>>,
 }
 
 impl StubDashboard {
@@ -30,6 +34,7 @@ impl StubDashboard {
             fail_render: AtomicBool::new(false),
             spawned: AtomicUsize::new(0),
             switch_at: None,
+            diag_now: Mutex::new(None),
         }
     }
 }
@@ -57,6 +62,11 @@ impl Dashboard for StubDashboard {
 
     fn switch_at(&self) -> Option<NaiveTime> {
         self.switch_at
+    }
+
+    fn diagnostics(&self, now: DateTime<Utc>) -> Vec<Section> {
+        *self.diag_now.lock().unwrap() = Some(now);
+        Vec::new()
     }
 
     fn health(&self, _now: DateTime<Utc>) -> serde_json::Value {
