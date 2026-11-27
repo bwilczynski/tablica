@@ -86,6 +86,9 @@ where
     info!(devices = %names.join(", "), "listening on {}", cfg.listen);
 
     let stop_pollers = stop.clone();
+    // Connect info gives the access log the peer address when no proxy sets
+    // `X-Forwarded-For`.
+    let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown.await;
