@@ -259,3 +259,150 @@ async fn diag_preview_for_family_and_homelab() {
         assert_eq!((reader.info().width, reader.info().height), (800, 480));
     }
 }
+
+fn diag_at() -> chrono::DateTime<Utc> {
+    warsaw(2026, 11, 25, 7, 0).with_timezone(&Utc)
+}
+
+/// A battery device: four days of steady drain every 15 min, a brownout two days
+/// ago, one error log, last check-in 12 minutes before `diag_at()`.
+fn battery_history(mac: &str) -> tablica_core::history::DeviceHistory {
+    use chrono::Duration;
+    use tablica_core::history::{DeviceHistory, DeviceLog, Reading};
+    let latest_at = diag_at() - Duration::minutes(12);
+    let readings: Vec<Reading> = (0..=4 * 96)
+        .rev()
+        .map(|i| Reading {
+            device: mac.into(),
+            at: latest_at - Duration::minutes(15 * i),
+            battery_v: Some(4.00 - 0.10 * (4 * 96 - i) as f64 / (4.0 * 96.0)),
+            rssi: Some(-84),
+            wifi_band: Some("2.4 GHz".into()),
+            wake_ms: Some(4100 + (i % 3) * 3900),
+            reset_reason: Some("ESP_RST_DEEPSLEEP".into()),
+            refresh_rate: Some(900),
+            next_refresh: Some(900),
+            fw_version: Some("1.8.19".into()),
+            fw_commit: Some("abc1234".into()),
+            model: Some("og".into()),
+            ..Reading::default()
+        })
+        .collect();
+    let latest = readings.last().cloned().unwrap();
+    let brownout = Reading {
+        reset_reason: Some("ESP_RST_BROWNOUT".into()),
+        ..readings[readings.len() - 1 - 2 * 96].clone()
+    };
+    DeviceHistory {
+        latest: Some(latest),
+        readings,
+        last_problem: Some(brownout),
+        last_log: Some(DeviceLog {
+            device: mac.into(),
+            received_at: diag_at() - Duration::minutes(15),
+            created_at: None,
+            level: Some("error".into()),
+            message: Some("display refresh failed: timeout".into()),
+            wake_reason: None,
+            raw: "{}".into(),
+        }),
+    }
+}
+
+/// Writes the diagnostics previews to `<workspace root>/target/preview/`.
+#[test]
+fn write_previews_diagnostics() {
+    use tablica_core::diagnostics::view::{DiagInput, build};
+    use tablica_core::diagnostics::{Row, Section, Status};
+    use tablica_core::history::DeviceHistory;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dashboards = active(dir.path());
+    let r = Renderer::new(TemplateSource::Embedded, &dashboards).unwrap();
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/preview");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let family = device("kitchen", "kitchen-key", "family");
+    let homelab = device("office", "office-key", "homelab");
+    let family_sections = dashboards["family"].diagnostics(diag_at());
+    let input = |device, history, sections| DiagInput {
+        device,
+        history: Ok(history),
+        sections,
+        at: diag_at(),
+        at_given: false,
+        tz: chrono_tz::Europe::Warsaw,
+    };
+
+    let mut dense = battery_history(&family.mac);
+    dense.last_log.as_mut().unwrap().message = Some("Wwwwwwwwww ".repeat(100));
+    let noted = |title: &str| Section {
+        title: title.into(),
+        rows: (0..8)
+            .map(|i| Row {
+                label: format!("Timetable {i} Wwwwwww"),
+                value: "47 h".into(),
+                status: [Status::Ok, Status::Warn, Status::Bad, Status::Unknown][i % 4],
+                note: Some("W".repeat(500)),
+            })
+            .collect(),
+    };
+
+    let jobs = [
+        (
+            "diag-battery-2bit",
+            build(input(
+                &family,
+                battery_history(&family.mac),
+                family_sections.clone(),
+            )),
+            BitDepth::Two,
+        ),
+        (
+            "diag-battery-1bit",
+            build(input(
+                &family,
+                battery_history(&family.mac),
+                family_sections,
+            )),
+            BitDepth::One,
+        ),
+        (
+            "diag-dense-2bit",
+            build(input(
+                &family,
+                dense,
+                vec![noted("Sources"), noted("Other")],
+            )),
+            BitDepth::Two,
+        ),
+        (
+            "diag-empty-2bit",
+            build(input(&homelab, DeviceHistory::default(), Vec::new())),
+            BitDepth::Two,
+        ),
+        (
+            "diag-sections-2bit",
+            build(input(
+                &family,
+                battery_history(&family.mac),
+                (0..10)
+                    .map(|i| Section {
+                        title: format!("Section {i}"),
+                        rows: vec![Row {
+                            label: format!("Source {i}"),
+                            value: "5 min".into(),
+                            status: Status::Ok,
+                            note: None,
+                        }],
+                    })
+                    .collect(),
+            )),
+            BitDepth::Two,
+        ),
+    ];
+    for (name, view, depth) in jobs {
+        let png = r.render_diag(&view, depth).unwrap();
+        std::fs::write(out.join(format!("{name}.png")), png).unwrap();
+    }
+}
