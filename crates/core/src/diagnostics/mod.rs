@@ -3,6 +3,7 @@
 
 pub mod battery;
 pub mod derive;
+pub mod view;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
