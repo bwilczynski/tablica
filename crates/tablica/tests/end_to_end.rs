@@ -134,3 +134,22 @@ async fn end_to_end_family_and_homelab() {
     let (office, _) = display(&afternoon, "office-key").await;
     assert_eq!(office["refresh_rate"], 900);
 }
+
+#[tokio::test]
+async fn serves_with_unusable_history() {
+    let root = tempfile::tempdir().unwrap();
+    write_setup(root.path());
+    // A directory where the database file belongs: the history cannot open.
+    fs::create_dir(root.path().join("data").join("history.db")).unwrap();
+
+    let state = app_at(root.path(), 7, 0);
+    assert!(!state.history.is_available());
+    let (status, _) = get(&state, "/api/display", Some("kitchen-key")).await;
+    assert_eq!(status, StatusCode::OK);
+    let log = Request::post("/api/log")
+        .header("Access-Token", "kitchen-key")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = router(state.clone()).oneshot(log).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
