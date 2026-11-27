@@ -207,3 +207,39 @@ async fn preview_family_at_switch() {
     assert_eq!(status, StatusCode::OK);
     assert_ne!(morning, evening);
 }
+
+fn diag_view() -> View {
+    use tablica_core::diagnostics::view::{DiagInput, build};
+    let device = device("kitchen", "kitchen-key", "family");
+    build(DiagInput {
+        device: &device,
+        history: Ok(Default::default()),
+        sections: Vec::new(),
+        at: warsaw(2026, 11, 25, 7, 0).with_timezone(&Utc),
+        at_given: false,
+        tz: chrono_tz::Europe::Warsaw,
+    })
+}
+
+#[test]
+fn diag_falls_back_to_embedded_in_dir_mode() {
+    let embedded = renderer(TemplateSource::Embedded)
+        .render_diag(&diag_view(), BitDepth::Two)
+        .unwrap();
+    let flat = flat_templates();
+    let dir = renderer(TemplateSource::Dir(flat.path().to_owned()));
+    assert_eq!(
+        dir.render_diag(&diag_view(), BitDepth::Two).unwrap(),
+        embedded
+    );
+
+    std::fs::write(
+        flat.path().join("diag.html"),
+        r#"<div style="width: 800px; height: 480px; background: black;"></div>"#,
+    )
+    .unwrap();
+    assert_ne!(
+        dir.render_diag(&diag_view(), BitDepth::Two).unwrap(),
+        embedded
+    );
+}
