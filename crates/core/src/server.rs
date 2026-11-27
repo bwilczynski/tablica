@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use crate::config::Loaded;
 use crate::dashboard::{Active, Dashboard, PrepareContext};
 use crate::device_api::{self, AppState, Clock, ImageStore};
+use crate::history::History;
 use crate::render::{Renderer, TemplateSource};
 
 pub struct ServeOptions {
@@ -42,11 +43,13 @@ pub fn prepare_state(
         active.insert(parsed.name, dashboard);
     }
     let renderer = Arc::new(Renderer::new(templates, &active).context("building the renderer")?);
+    let history = Arc::new(History::open(&cfg.data_dir, clock.clone()));
     let state = AppState {
         cfg,
         dashboards: Arc::new(active),
         renderer,
         images: Arc::new(ImageStore::new()),
+        history,
         clock,
     };
     Ok((state, ordered))
@@ -67,6 +70,7 @@ where
 {
     let (state, dashboards) = prepare_state(loaded, opts.templates, Arc::new(chrono::Utc::now))?;
     let cfg = state.cfg.clone();
+    let history = state.history.clone();
     // Only after preparing: until here a signal keeps its default exit behaviour,
     // even while a cache read blocks.
     let shutdown = shutdown()?;
@@ -106,6 +110,10 @@ where
     .await;
     if stopped.is_err() {
         warn!("fetchers did not stop in time");
+    }
+    // Flush what is queued and stop the writer; early returns above rely on `Drop`.
+    if let Err(e) = tokio::task::spawn_blocking(move || history.shutdown()).await {
+        warn!("history shutdown failed: {e}");
     }
     served?;
     info!("stopped");

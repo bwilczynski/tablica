@@ -12,6 +12,7 @@ use serde_json::Value;
 use tablica_core::config::{BitDepth, Config, Device, Schedule};
 use tablica_core::dashboard::{Active, Dashboard, View};
 use tablica_core::device_api::{AppState, ImageStore, router};
+use tablica_core::history::History;
 use tablica_core::render::{Renderer, TemplateSource};
 use tablica_family::test_support::{sample_view_morning, seeded_family, time, warsaw};
 use tablica_homelab::HomelabDashboard;
@@ -129,6 +130,7 @@ fn state(data_dir: &Path, templates: TemplateSource) -> AppState {
         renderer: Arc::new(renderer),
         images: Arc::new(ImageStore::new()),
         clock: Arc::new(move || fixed),
+        history: Arc::new(History::disabled()),
     }
 }
 

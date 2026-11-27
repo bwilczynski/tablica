@@ -5,8 +5,10 @@ pub mod images;
 pub mod refresh;
 #[cfg(test)]
 pub(crate) mod stub;
+mod telemetry;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context;
 use axum::body::Bytes;
@@ -22,6 +24,7 @@ use tracing::{info, warn};
 
 use crate::config::{BitDepth, Config, Device};
 use crate::dashboard::Active;
+use crate::history::History;
 use crate::render::Renderer;
 use access_log::Access;
 pub use images::ImageStore;
@@ -37,6 +40,7 @@ pub struct AppState {
     pub renderer: Arc<Renderer>,
     pub images: Arc<ImageStore>,
     pub clock: Clock,
+    pub history: Arc<History>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -168,13 +172,23 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
     };
     let now = (state.clock)();
     let dashboard = device.dashboard.as_str();
-    let filename = match render_blocking(&state, dashboard, now, device.bit_depth).await {
-        Ok(png) => state.images.put(&device.name, dashboard, png, now),
+    let mut reading = telemetry::reading(&device.mac, now, &headers);
+    let started = Instant::now();
+    let rendered = render_blocking(&state, dashboard, now, device.bit_depth).await;
+    if rendered.is_ok() {
+        reading.render_ms = Some(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
+    }
+    let filename = match rendered {
+        Ok(png) => {
+            reading.image_bytes = i64::try_from(png.len()).ok();
+            state.images.put(&device.name, dashboard, png, now)
+        }
         Err(e) => {
             warn!(device = %device.name, "render failed: {e:#}");
             match state.images.latest(&device.name) {
                 Some(previous) => previous,
                 None => {
+                    state.history.record_reading(reading);
                     let response = (
                         StatusCode::SERVICE_UNAVAILABLE,
                         Json(json!({
@@ -201,6 +215,8 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
         switch_at,
     );
     let image_url = format!("{}/images/{filename}.png", base_url(&state.cfg));
+    reading.next_refresh = Some(i64::from(rate));
+    state.history.record_reading(reading);
     let response = Json(json!({
         "status": 0,
         "image_url": image_url,
@@ -235,6 +251,9 @@ async fn device_log(State(state): State<AppState>, headers: HeaderMap, body: Byt
         return noted(response, unknown_token(&state.cfg, &headers));
     };
     let note = Access::served(&device.name, None);
+    state
+        .history
+        .record_log_body(&device.mac, (state.clock)(), &body);
     let device = device.name.as_str();
     match serde_json::from_slice::<Value>(&body) {
         Ok(v) => {
@@ -324,6 +343,7 @@ mod tests {
 
     use crate::config::{BitDepth, Device, Schedule};
     use crate::dashboard::Dashboard;
+    use crate::history::History;
     use crate::render::TemplateSource;
     use stub::StubDashboard;
 
@@ -358,6 +378,15 @@ mod tests {
     /// Two stub dashboards and a clock pinned to Wednesday 2026-11-25 `h:m` Warsaw.
     /// `kitchen` shows `alpha` (switches at 18:00) at 2 bits, `office` `bravo` at 1 bit.
     fn fixture_at(h: u32, m: u32) -> Fixture {
+        fixture_with(h, m, Arc::new(History::disabled()), std::env::temp_dir())
+    }
+
+    fn fixture_with(
+        h: u32,
+        m: u32,
+        history: Arc<History>,
+        data_dir: std::path::PathBuf,
+    ) -> Fixture {
         let alpha = Arc::new(StubDashboard {
             switch_at: Some(time(18, 0)),
             ..StubDashboard::new("alpha")
@@ -371,7 +400,7 @@ mod tests {
             timezone: Warsaw,
             base_url: format!("{BASE}/"),
             listen: "127.0.0.1:0".parse().unwrap(),
-            data_dir: std::env::temp_dir(),
+            data_dir,
             schedule: Schedule {
                 wake: time(6, 0),
                 sleep: time(22, 0),
@@ -403,6 +432,7 @@ mod tests {
                 renderer: Arc::new(renderer),
                 images: Arc::new(ImageStore::new()),
                 clock: Arc::new(move || fixed),
+                history,
             },
             alpha,
         }
@@ -486,6 +516,199 @@ mod tests {
         );
     }
 
+    fn open_history(dir: &std::path::Path, at: DateTime<Utc>) -> Arc<History> {
+        Arc::new(History::open(dir, Arc::new(move || at)))
+    }
+
+    const KITCHEN_MAC: &str = "AA:BB:CC:DD:EE:01";
+
+    #[tokio::test]
+    async fn display_records_a_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let (status, _) = send_json(
+            &f.state,
+            get(
+                "/api/display",
+                &[
+                    ("Access-Token", "kitchen-key"),
+                    ("Battery-Voltage", "4.01"),
+                    ("RSSI", "-84"),
+                    ("Wake-Time", "4123"),
+                    ("Reset-Reason", "ESP_RST_DEEPSLEEP"),
+                    ("Update-Source", "timer"),
+                    ("Image-Cached", "true"),
+                    ("Refresh-Rate", "900"),
+                    ("FW-Version", "1.8.19"),
+                    ("Model", "xiao_epaper_display"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        history.flush();
+        let r = history
+            .snapshot(KITCHEN_MAC, warsaw(7, 0))
+            .unwrap()
+            .latest
+            .unwrap();
+        assert_eq!(r.battery_v, Some(4.01));
+        assert_eq!(r.rssi, Some(-84));
+        assert_eq!(r.wake_ms, Some(4123));
+        assert_eq!(r.reset_reason.as_deref(), Some("ESP_RST_DEEPSLEEP"));
+        assert_eq!(r.update_source.as_deref(), Some("timer"));
+        assert_eq!(r.image_cached, Some(true));
+        assert_eq!(r.refresh_rate, Some(900));
+        assert_eq!(r.fw_version.as_deref(), Some("1.8.19"));
+        assert_eq!(r.model.as_deref(), Some("xiao_epaper_display"));
+        assert_eq!(r.next_refresh, Some(900));
+        assert!(r.render_ms.is_some());
+        assert!(r.image_bytes.is_some_and(|n| n > 0));
+    }
+
+    #[tokio::test]
+    async fn hostile_headers_are_null_and_reply_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let (_, _, plain) = send(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        let long = "x".repeat(10 * 1024);
+        for voltage in ["NaN", "inf"] {
+            let (_, _, hostile) = send(
+                &f.state,
+                get(
+                    "/api/display",
+                    &[
+                        ("Access-Token", "kitchen-key"),
+                        ("RSSI", "abc"),
+                        ("Battery-Voltage", voltage),
+                        ("Wake-Time", "-5"),
+                        ("Refresh-Rate", "99999999"),
+                        ("FW-Version", &long),
+                    ],
+                ),
+            )
+            .await;
+            assert_eq!(hostile, plain);
+        }
+        history.flush();
+        let snap = history.snapshot(KITCHEN_MAC, warsaw(7, 0)).unwrap();
+        let r = snap.latest.unwrap();
+        assert_eq!(r.rssi, None);
+        assert_eq!(r.battery_v, None);
+        assert_eq!(r.wake_ms, None);
+        assert_eq!(r.refresh_rate, None);
+        assert_eq!(r.fw_version.unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn unknown_token_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let (status, _, _) = send(
+            &f.state,
+            get(
+                "/api/display",
+                &[("Access-Token", "nope"), ("ID", KITCHEN_MAC)],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let log = Request::post("/api/log")
+            .header("Access-Token", "nope")
+            .body(Body::from("{}"))
+            .unwrap();
+        send(&f.state, log).await;
+        history.flush();
+        let snap = history.snapshot(KITCHEN_MAC, warsaw(7, 0)).unwrap();
+        assert!(snap.latest.is_none() && snap.last_log.is_none());
+    }
+
+    fn post_log(token: &str, body: &str) -> Request<Body> {
+        Request::post("/api/log")
+            .header("Access-Token", token)
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn device_log_stores_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let body = r#"{"logs":[{"created_at":1795810000,"message":"HTTP GET failed","level":"error","wake_reason":"timer"}]}"#;
+        let (status, _, _) = send(&f.state, post_log("kitchen-key", body)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        history.flush();
+        let log = history
+            .snapshot(KITCHEN_MAC, warsaw(7, 0))
+            .unwrap()
+            .last_log
+            .unwrap();
+        assert_eq!(log.message.as_deref(), Some("HTTP GET failed"));
+        assert!(log.created_at.is_some());
+
+        let (status, _, _) = send(&f.state, post_log("kitchen-key", "not json")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        history.flush();
+        let log = history
+            .snapshot(KITCHEN_MAC, warsaw(7, 0))
+            .unwrap()
+            .last_log
+            .unwrap();
+        assert_eq!(log.raw, "not json");
+    }
+
+    #[tokio::test]
+    async fn history_keeps_following_a_renamed_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        send(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        history.flush();
+        history.shutdown();
+        drop(f);
+
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let mut f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let mut cfg = (*f.state.cfg).clone();
+        cfg.devices[0].name = "galley".into();
+        f.state.cfg = Arc::new(cfg);
+        send(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        history.flush();
+        let snap = history.snapshot(KITCHEN_MAC, warsaw(7, 0)).unwrap();
+        assert_eq!(snap.readings.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn display_and_log_with_history_disabled() {
+        let f = fixture();
+        assert!(!f.state.history.is_available());
+        let (status, body) = send_json(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["special_function"], "none");
+        let (status, _, _) = send(&f.state, post_log("kitchen-key", "{}")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     #[tokio::test]
     async fn display_rejects_bad_token_without_reset() {
         let f = fixture();
@@ -518,6 +741,7 @@ mod tests {
         assert_eq!(first["refresh_rate"], 900);
         assert_eq!(first["status"], 0);
         assert_eq!(first["reset_firmware"], false);
+        assert_eq!(first["special_function"], "none");
         assert_eq!(first["update_firmware"], false);
         assert_eq!(first["firmware_url"], Value::Null);
         assert_eq!(first["special_function"], "none");
