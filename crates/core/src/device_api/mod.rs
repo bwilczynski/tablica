@@ -20,11 +20,13 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::config::{BitDepth, Config, Device};
 use crate::dashboard::Active;
-use crate::history::History;
+use crate::diagnostics::view::{DiagInput, build};
+use crate::history::{History, READ_DEADLINE};
 use crate::render::Renderer;
 use access_log::Access;
 pub use images::ImageStore;
@@ -41,6 +43,8 @@ pub struct AppState {
     pub images: Arc<ImageStore>,
     pub clock: Clock,
     pub history: Arc<History>,
+    /// Serialises diagnostics history reads: at most one at a time.
+    pub diag_reads: Arc<Semaphore>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -280,6 +284,25 @@ async fn image(State(state): State<AppState>, Path(file): Path<String>) -> Respo
 struct PreviewQuery {
     at: Option<String>,
     depth: Option<u8>,
+    device: Option<String>,
+}
+
+/// The `depth` query value, or a 400 response.
+fn parse_depth(depth: Option<u8>) -> Result<BitDepth, (StatusCode, &'static str)> {
+    match depth {
+        None | Some(2) => Ok(BitDepth::Two),
+        Some(1) => Ok(BitDepth::One),
+        Some(_) => Err((StatusCode::BAD_REQUEST, "depth must be 1 or 2")),
+    }
+}
+
+/// The `at` query value, or a 400 response.
+fn parse_at(at: Option<String>) -> Result<Option<DateTime<Utc>>, (StatusCode, &'static str)> {
+    let Some(at) = at else { return Ok(None) };
+    // An unencoded `+` in the offset arrives as a space.
+    DateTime::parse_from_rfc3339(&at.replace(' ', "+"))
+        .map(|t| Some(t.with_timezone(&Utc)))
+        .map_err(|_| (StatusCode::BAD_REQUEST, "at must be an RFC 3339 timestamp"))
 }
 
 async fn preview(
@@ -287,32 +310,116 @@ async fn preview(
     Path(file): Path<String>,
     Query(q): Query<PreviewQuery>,
 ) -> Response {
+    if file == "diag.png" {
+        return diag_preview(&state, q).await;
+    }
     let Some(dashboard) = file
         .strip_suffix(".png")
         .filter(|name| state.dashboards.contains_key(name))
     else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let depth = match q.depth {
-        None | Some(2) => BitDepth::Two,
-        Some(1) => BitDepth::One,
-        Some(_) => return (StatusCode::BAD_REQUEST, "depth must be 1 or 2").into_response(),
+    let depth = match parse_depth(q.depth) {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
     };
-    let now = match q.at {
-        None => (state.clock)(),
-        // An unencoded `+` in the offset arrives as a space.
-        Some(at) => match DateTime::parse_from_rfc3339(&at.replace(' ', "+")) {
-            Ok(t) => t.with_timezone(&Utc),
-            Err(_) => {
-                return (StatusCode::BAD_REQUEST, "at must be an RFC 3339 timestamp")
-                    .into_response();
-            }
-        },
+    let now = match parse_at(q.at) {
+        Ok(at) => at.unwrap_or_else(|| (state.clock)()),
+        Err(e) => return e.into_response(),
     };
     match render_blocking(&state, dashboard, now, depth).await {
         Ok(png) => png_response(png),
         Err(e) => {
             warn!("preview render failed: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Reads the history and dashboard sections for `device`'s diagnostics screen.
+/// `at` moves only the history; dashboards always get the real "now".
+pub(crate) async fn diag_input<'a>(
+    state: &AppState,
+    device: &'a Device,
+    at: Option<DateTime<Utc>>,
+) -> DiagInput<'a> {
+    let now = (state.clock)();
+    let moment = at.unwrap_or(now);
+    let history = read_history(state, &device.mac, moment).await;
+    let sections = state
+        .dashboards
+        .get(device.dashboard.as_str())
+        .map(|d| d.diagnostics(now))
+        .unwrap_or_default();
+    DiagInput {
+        device,
+        history,
+        sections,
+        at: moment,
+        at_given: at.is_some(),
+        tz: state.cfg.timezone,
+    }
+}
+
+/// One history snapshot, at most one at a time, within the read deadline. A read
+/// still in flight (even a stuck one) makes this one "unavailable" at once
+/// rather than queueing behind it.
+///
+/// The read runs on its own detached thread, not Tokio's blocking pool: the
+/// runtime waits for blocking-pool tasks when it shuts down, so a stalled read
+/// there could hold up process exit.
+async fn read_history(
+    state: &AppState,
+    mac: &str,
+    at: DateTime<Utc>,
+) -> anyhow::Result<crate::history::DeviceHistory> {
+    let permit = state
+        .diag_reads
+        .clone()
+        .try_acquire_owned()
+        .context("another history read is in progress")?;
+    let (history, mac) = (state.history.clone(), mac.to_owned());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("history-read".into())
+        .spawn(move || {
+            let result = history.snapshot(&mac, at);
+            drop(permit);
+            let _ = tx.send(result);
+        })
+        .context("cannot start the history read")?;
+    tokio::time::timeout(READ_DEADLINE + std::time::Duration::from_secs(1), rx)
+        .await
+        .context("history read timed out")?
+        .context("history read ended without a result")?
+}
+
+async fn diag_preview(state: &AppState, q: PreviewQuery) -> Response {
+    let Some(name) = q.device.as_deref() else {
+        return (StatusCode::BAD_REQUEST, "device is required").into_response();
+    };
+    let Some(device) = state.cfg.devices.iter().find(|d| d.name == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let depth = match parse_depth(q.depth) {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let at = match parse_at(q.at) {
+        Ok(at) => at,
+        Err(e) => return e.into_response(),
+    };
+    let view = build(diag_input(state, device, at).await);
+    let renderer = state.renderer.clone();
+    let rendered = tokio::task::spawn_blocking(move || renderer.render_diag(&view, depth)).await;
+    match rendered {
+        Ok(Ok(png)) => png_response(png),
+        Ok(Err(e)) => {
+            warn!("diagnostics render failed: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            warn!("diagnostics render task failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -433,6 +540,7 @@ mod tests {
                 images: Arc::new(ImageStore::new()),
                 clock: Arc::new(move || fixed),
                 history,
+                diag_reads: Arc::new(Semaphore::new(1)),
             },
             alpha,
         }
@@ -522,6 +630,229 @@ mod tests {
 
     const KITCHEN_MAC: &str = "AA:BB:CC:DD:EE:01";
 
+    fn reading_at(mac: &str, at: DateTime<Utc>) -> crate::history::Reading {
+        crate::history::Reading {
+            device: mac.into(),
+            at,
+            battery_v: Some(4.0),
+            rssi: Some(-60),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn diag_preview_requires_known_device() {
+        let f = fixture();
+        for (uri, want) in [
+            ("/preview/diag.png", StatusCode::BAD_REQUEST),
+            ("/preview/diag.png?device=nobody", StatusCode::NOT_FOUND),
+            (
+                "/preview/diag.png?device=kitchen&depth=3",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/preview/diag.png?device=kitchen&at=nope",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, _, _) = send(&f.state, get(uri, &[])).await;
+            assert_eq!(status, want, "{uri}");
+        }
+        let (_, _, body) = send(&f.state, get("/preview/diag.png", &[])).await;
+        assert_eq!(body, b"device is required");
+    }
+
+    #[tokio::test]
+    async fn diag_preview_renders_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let (status, _, _) = send(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        history.flush();
+        let (status, headers, body) =
+            send(&f.state, get("/preview/diag.png?device=kitchen", &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        let info = png::Decoder::new(std::io::Cursor::new(&body))
+            .read_info()
+            .unwrap();
+        assert_eq!(
+            (info.info().width, info.info().height, info.info().bit_depth),
+            (800, 480, png::BitDepth::Two)
+        );
+        let (status, _, body) = send(
+            &f.state,
+            get("/preview/diag.png?device=kitchen&depth=1", &[]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(png_depth(&body), png::BitDepth::One);
+    }
+
+    #[tokio::test]
+    async fn diag_input_filters_history_by_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        history.record_reading(reading_at(KITCHEN_MAC, warsaw(6, 0)));
+        history.record_reading(reading_at(KITCHEN_MAC, warsaw(7, 0)));
+        history.flush();
+        let f = fixture_with(8, 0, history, dir.path().to_owned());
+        let device = &f.state.cfg.devices[0];
+        let latest = |at: DateTime<Utc>| {
+            let state = f.state.clone();
+            async move {
+                let input = diag_input(&state, device, Some(at)).await;
+                assert!(input.at_given);
+                assert_eq!(input.at, at);
+                input.history.unwrap().latest.map(|r| r.at)
+            }
+        };
+        assert_eq!(latest(warsaw(6, 30)).await, Some(warsaw(6, 0)));
+        let year = chrono::Duration::days(365);
+        assert_eq!(latest(warsaw(6, 30) - year).await, None);
+        assert_eq!(latest(warsaw(6, 30) + year).await, Some(warsaw(7, 0)));
+        let input = diag_input(&f.state, device, None).await;
+        assert!(!input.at_given);
+        assert_eq!(input.at, warsaw(8, 0));
+    }
+
+    #[tokio::test]
+    async fn diag_input_passes_real_now_to_dashboards() {
+        let f = fixture_at(7, 0);
+        let device = &f.state.cfg.devices[0];
+        let earlier = warsaw(3, 0);
+        let input = diag_input(&f.state, device, Some(earlier)).await;
+        assert!(input.sections.is_empty());
+        assert_eq!(*f.alpha.diag_now.lock().unwrap(), Some(warsaw(7, 0)));
+    }
+
+    #[tokio::test]
+    async fn busy_history_read_is_unavailable_not_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        history.record_reading(reading_at(KITCHEN_MAC, warsaw(6, 0)));
+        history.flush();
+        let f = fixture_with(7, 0, history, dir.path().to_owned());
+        let _held = f.state.diag_reads.clone().try_acquire_owned().unwrap();
+        let quick = std::time::Duration::from_millis(500);
+
+        let device = &f.state.cfg.devices[0];
+        let input = tokio::time::timeout(quick, diag_input(&f.state, device, None))
+            .await
+            .expect("diag_input waited for the busy permit");
+        assert!(input.history.is_err());
+
+        let (status, headers, body) = tokio::time::timeout(
+            quick,
+            send(&f.state, get("/preview/diag.png?device=kitchen", &[])),
+        )
+        .await
+        .expect("diag preview waited for the busy permit");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        assert_eq!(png_depth(&body), png::BitDepth::Two);
+    }
+
+    /// Paused time: the clock jumps once the runtime is idle, so waiting out
+    /// the deadline is instant, while a read on Tokio's blocking pool would
+    /// hold the clock (and the runtime's exit) until it finished. The body runs
+    /// on its own thread under a real-time watchdog, so that regression fails
+    /// the test instead of hanging it.
+    #[test]
+    fn stalled_history_read_is_unavailable_within_the_deadline() {
+        const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(10);
+        let (finished, done) = std::sync::mpsc::channel();
+        let body = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap()
+                .block_on(stalled_read_body());
+            let _ = finished.send(());
+        });
+        match done.recv_timeout(WATCHDOG) {
+            // Disconnected: the body panicked; join to report its panic.
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if let Err(panic) = body.join() {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "a stalled history read hung the handler for {WATCHDOG:?}: \
+                 is it back on Tokio's blocking pool?"
+            ),
+        }
+    }
+
+    async fn stalled_read_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        history.record_reading(reading_at(KITCHEN_MAC, warsaw(6, 0)));
+        history.flush();
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        let device = &f.state.cfg.devices[0];
+        let limit = READ_DEADLINE + std::time::Duration::from_secs(1);
+
+        let release = history.stall_next_read();
+        let start = tokio::time::Instant::now();
+        let input = diag_input(&f.state, device, None).await;
+        assert!(input.history.is_err());
+        assert!(start.elapsed() <= limit, "{:?}", start.elapsed());
+        // The stalled read still holds the permit, so the next one is refused.
+        assert_eq!(f.state.diag_reads.available_permits(), 0);
+
+        drop(release);
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let permit = loop {
+            match f.state.diag_reads.clone().try_acquire_owned() {
+                Ok(p) => break p,
+                Err(_) if std::time::Instant::now() < give_up => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => panic!("the released read never gave its permit back"),
+            }
+        };
+        drop(permit);
+
+        let release = history.stall_next_read();
+        let start = tokio::time::Instant::now();
+        let (status, _, body) = send(&f.state, get("/preview/diag.png?device=kitchen", &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(png_depth(&body), png::BitDepth::Two);
+        assert!(start.elapsed() <= limit, "{:?}", start.elapsed());
+        drop(release);
+    }
+
+    #[tokio::test]
+    async fn diag_preview_with_history_disabled() {
+        let f = fixture();
+        let (status, _, body) = send(&f.state, get("/preview/diag.png?device=office", &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(png_depth(&body), png::BitDepth::Two);
+    }
+
+    #[tokio::test]
+    async fn diag_preview_does_not_touch_image_store() {
+        let f = fixture();
+        let (status, _, _) = send(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let before = f.state.images.latest("kitchen");
+        assert!(before.is_some());
+        let (status, _, _) = send(&f.state, get("/preview/diag.png?device=kitchen", &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(f.state.images.latest("kitchen"), before);
+    }
+
     #[tokio::test]
     async fn display_records_a_reading() {
         let dir = tempfile::tempdir().unwrap();
@@ -565,6 +896,44 @@ mod tests {
         assert_eq!(r.next_refresh, Some(900));
         assert!(r.render_ms.is_some());
         assert!(r.image_bytes.is_some_and(|n| n > 0));
+    }
+
+    #[tokio::test]
+    async fn failed_render_without_image_records_a_bare_reading() {
+        let plain = fixture();
+        plain.alpha.fail_render.store(true, Ordering::SeqCst);
+        let kitchen = || {
+            get(
+                "/api/display",
+                &[("Access-Token", "kitchen-key"), ("Battery-Voltage", "3.9")],
+            )
+        };
+        let (want_status, want_headers, want_body) = send(&plain.state, kitchen()).await;
+        assert_eq!(want_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&want_body).unwrap(),
+            serde_json::json!({"status": 503, "error": "image not available", "reset_firmware": false})
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let history = open_history(dir.path(), warsaw(7, 0));
+        let f = fixture_with(7, 0, history.clone(), dir.path().to_owned());
+        f.alpha.fail_render.store(true, Ordering::SeqCst);
+        let (status, headers, body) = send(&f.state, kitchen()).await;
+        assert_eq!(status, want_status);
+        assert_eq!(headers, want_headers);
+        assert_eq!(body, want_body);
+
+        history.flush();
+        let r = history
+            .snapshot(KITCHEN_MAC, warsaw(7, 0))
+            .unwrap()
+            .latest
+            .unwrap();
+        assert_eq!(r.battery_v, Some(3.9));
+        assert_eq!(r.render_ms, None);
+        assert_eq!(r.image_bytes, None);
+        assert_eq!(r.next_refresh, None);
     }
 
     #[tokio::test]
@@ -744,7 +1113,6 @@ mod tests {
         assert_eq!(first["special_function"], "none");
         assert_eq!(first["update_firmware"], false);
         assert_eq!(first["firmware_url"], Value::Null);
-        assert_eq!(first["special_function"], "none");
         assert_eq!(first["maximum_compatibility"], false);
         assert_eq!(first["temperature_profile"], "default");
         assert_eq!(

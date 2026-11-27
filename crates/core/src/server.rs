@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -19,7 +20,9 @@ pub struct ServeOptions {
     pub stop_timeout: Duration,
 }
 
-/// Prepares every dashboard and builds the renderer and the app state. Touches
+/// Prepares every dashboard and builds the renderer and the app state. Also
+/// creates `data_dir`, opens `data_dir/history.db` and starts the history writer
+/// thread; a history that cannot be opened is disabled, never an error. Touches
 /// neither the network nor any listener. Returns the state and the prepared
 /// dashboards, in entry order, so the caller decides when to start their pollers.
 pub fn prepare_state(
@@ -50,6 +53,7 @@ pub fn prepare_state(
         renderer,
         images: Arc::new(ImageStore::new()),
         history,
+        diag_reads: Arc::new(Semaphore::new(1)),
         clock,
     };
     Ok((state, ordered))

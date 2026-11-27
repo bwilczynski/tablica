@@ -131,6 +131,7 @@ fn state(data_dir: &Path, templates: TemplateSource) -> AppState {
         images: Arc::new(ImageStore::new()),
         clock: Arc::new(move || fixed),
         history: Arc::new(History::disabled()),
+        diag_reads: Arc::new(tokio::sync::Semaphore::new(1)),
     }
 }
 
@@ -242,4 +243,19 @@ fn diag_falls_back_to_embedded_in_dir_mode() {
         dir.render_diag(&diag_view(), BitDepth::Two).unwrap(),
         embedded
     );
+}
+
+#[tokio::test]
+async fn diag_preview_for_family_and_homelab() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path(), TemplateSource::Embedded);
+    for device in ["kitchen", "office"] {
+        let (status, bytes) =
+            send(&state, &format!("/preview/diag.png?device={device}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{device}");
+        let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (800, 480));
+    }
 }
