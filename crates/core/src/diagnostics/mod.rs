@@ -1,6 +1,9 @@
 //! The diagnostics contract: what each dashboard contributes to a device's
 //! diagnostics screen.
 
+pub mod battery;
+pub mod derive;
+
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
