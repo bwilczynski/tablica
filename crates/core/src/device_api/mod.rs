@@ -1,5 +1,6 @@
 //! The TRMNL device API (BYOS protocol) plus preview and health endpoints.
 
+mod access_log;
 pub mod images;
 pub mod refresh;
 #[cfg(test)]
@@ -17,11 +18,12 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::config::{BitDepth, Config, Device};
 use crate::dashboard::Active;
 use crate::render::Renderer;
+use access_log::Access;
 pub use images::ImageStore;
 pub use refresh::refresh_rate;
 
@@ -45,6 +47,10 @@ pub fn router(state: AppState) -> Router {
         .route("/images/{file}", get(image))
         .route("/preview/{file}", get(preview))
         .route("/healthz", get(healthz))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            access_log::layer,
+        ))
         .with_state(state)
 }
 
@@ -113,6 +119,12 @@ fn base_url(cfg: &Config) -> &str {
     cfg.base_url.trim_end_matches('/')
 }
 
+/// `response` with `note` attached for the access log.
+fn noted(mut response: Response, note: Access) -> Response {
+    response.extensions_mut().insert(note);
+    response
+}
+
 fn png_response(png: Vec<u8>) -> Response {
     ([(header::CONTENT_TYPE, "image/png")], png).into_response()
 }
@@ -120,58 +132,40 @@ fn png_response(png: Vec<u8>) -> Response {
 async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let mac = header_str(&headers, "ID").unwrap_or_default();
     let Some(device) = device_by_mac(&state.cfg, mac) else {
-        warn!(mac, "setup from unknown device");
-        return (
+        let response = (
             StatusCode::NOT_FOUND,
             Json(json!({"status": 404, "message": "unknown device"})),
         )
             .into_response();
+        return noted(response, Access::refused("unknown device"));
     };
-    info!(device = %device.name, "device setup");
     let friendly_id = images::sha256_hex(device.mac.as_bytes(), 6).to_uppercase();
-    Json(json!({
+    let image_url = format!(
+        "{}/preview/{}.png?depth={}",
+        base_url(&state.cfg),
+        device.dashboard,
+        depth_number(device.bit_depth),
+    );
+    let response = Json(json!({
         "status": 200,
         "api_key": device.api_key,
         "friendly_id": friendly_id,
-        "image_url": format!(
-            "{}/preview/{}.png?depth={}",
-            base_url(&state.cfg),
-            device.dashboard,
-            depth_number(device.bit_depth),
-        ),
+        "image_url": image_url,
         "message": format!("tablica: {}", device.name),
     }))
-    .into_response()
+    .into_response();
+    noted(response, Access::served(&device.name, Some(image_url)))
 }
 
 async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(device) = authenticate(&state.cfg, &headers) else {
-        // The MAC tells a configured device holding a stale key (e.g. one issued by
-        // another server) apart from a stranger. The token itself is never logged.
-        let mac = header_str(&headers, "ID").unwrap_or_default();
-        let configured = device_by_mac(&state.cfg, mac).map_or("-", |d| d.name.as_str());
-        warn!(
-            mac,
-            configured, "display request with an unknown access token"
-        );
-        return (
+        let response = (
             StatusCode::UNAUTHORIZED,
             Json(json!({"status": 500, "error": "Device not found", "reset_firmware": false})),
         )
             .into_response();
+        return noted(response, unknown_token(&state.cfg, &headers));
     };
-    let h = |name| header_str(&headers, name).unwrap_or("-");
-    debug!(
-        device = %device.name,
-        battery_voltage = h("Battery-Voltage"),
-        rssi = h("RSSI"),
-        fw_version = h("FW-Version"),
-        model = h("Model"),
-        width = h("Width"),
-        height = h("Height"),
-        "display request"
-    );
-
     let now = (state.clock)();
     let dashboard = device.dashboard.as_str();
     let filename = match render_blocking(&state, dashboard, now, device.bit_depth).await {
@@ -181,7 +175,7 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
             match state.images.latest(&device.name) {
                 Some(previous) => previous,
                 None => {
-                    return (
+                    let response = (
                         StatusCode::SERVICE_UNAVAILABLE,
                         Json(json!({
                             "status": 503,
@@ -190,6 +184,11 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
                         })),
                     )
                         .into_response();
+                    let note = Access {
+                        reason: Some("render failed and no previous image".into()),
+                        ..Access::served(&device.name, None)
+                    };
+                    return noted(response, note);
                 }
             }
         }
@@ -201,9 +200,10 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
         &state.cfg.schedule,
         switch_at,
     );
-    Json(json!({
+    let image_url = format!("{}/images/{filename}.png", base_url(&state.cfg));
+    let response = Json(json!({
         "status": 0,
-        "image_url": format!("{}/images/{filename}.png", base_url(&state.cfg)),
+        "image_url": image_url,
         "filename": filename,
         "refresh_rate": rate,
         "reset_firmware": false,
@@ -213,14 +213,28 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
         "maximum_compatibility": false,
         "temperature_profile": "default",
     }))
-    .into_response()
+    .into_response();
+    noted(response, Access::served(&device.name, Some(image_url)))
 }
 
-async fn device_log(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> StatusCode {
-    // Only known devices may write to the log; anyone else is turned away unlogged.
+/// The access-log note for a request whose `Access-Token` matches no device. The
+/// MAC tells a configured device holding a stale key (e.g. one issued by another
+/// server) apart from a stranger.
+fn unknown_token(cfg: &Config, headers: &HeaderMap) -> Access {
+    let mac = header_str(headers, "ID").unwrap_or_default();
+    Access::refused(match device_by_mac(cfg, mac) {
+        Some(d) => format!("unknown access token; ID is configured device {}", d.name),
+        None => "unknown access token".to_owned(),
+    })
+}
+
+async fn device_log(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // Only known devices may write to the log; anyone else gets only an access line.
     let Some(device) = authenticate(&state.cfg, &headers) else {
-        return StatusCode::UNAUTHORIZED;
+        let response = StatusCode::UNAUTHORIZED.into_response();
+        return noted(response, unknown_token(&state.cfg, &headers));
     };
+    let note = Access::served(&device.name, None);
     let device = device.name.as_str();
     match serde_json::from_slice::<Value>(&body) {
         Ok(v) => {
@@ -234,7 +248,7 @@ async fn device_log(State(state): State<AppState>, headers: HeaderMap, body: Byt
         }
         Err(_) => warn!(device, "device log body is not JSON ({} bytes)", body.len()),
     }
-    StatusCode::NO_CONTENT
+    noted(StatusCode::NO_CONTENT.into_response(), note)
 }
 
 async fn image(State(state): State<AppState>, Path(file): Path<String>) -> Response {
@@ -671,6 +685,243 @@ mod tests {
             let (status, _, _) = send(&f.state, req.body(Body::from(body)).unwrap()).await;
             assert_eq!(status, code, "{body}");
         }
+    }
+
+    /// Runs `f` with every log line at `debug` and above that this thread emits
+    /// captured, and returns them.
+    ///
+    /// A scoped subscriber is not enough: other tests hit the same callsites
+    /// concurrently and can cache "never interested" for it. So one global
+    /// subscriber is installed for the test binary, and its writer appends to the
+    /// capturing thread's buffer (the test runtime is single-threaded, so the
+    /// middleware and handlers run on that thread) and drops everything else.
+    async fn captured_logs<F: Future<Output = ()>>(f: F) -> String {
+        use std::cell::RefCell;
+        use std::sync::Once;
+
+        thread_local! {
+            static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+        }
+        struct ThreadSink;
+        impl std::io::Write for ThreadSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                CAPTURE.with_borrow_mut(|c| {
+                    if let Some(c) = c {
+                        c.extend_from_slice(buf);
+                    }
+                });
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(|| ThreadSink)
+                .init();
+        });
+
+        CAPTURE.set(Some(Vec::new()));
+        f.await;
+        let bytes = CAPTURE.take().unwrap_or_default();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn line_with<'a>(logs: &'a str, needle: &str) -> &'a str {
+        logs.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line with {needle:?} in:\n{logs}"))
+    }
+
+    /// `req` as if it arrived over TCP from `peer`.
+    fn from_peer(mut req: Request<Body>, peer: &str) -> Request<Body> {
+        let addr = std::net::SocketAddr::new(peer.parse().unwrap(), 40000);
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        req
+    }
+
+    #[tokio::test]
+    async fn access_log_records_each_request() {
+        let f = fixture();
+        let logs = captured_logs(async {
+            let display = get(
+                "/api/display",
+                &[
+                    ("Access-Token", "kitchen-key"),
+                    ("ID", "aa-bb-cc-dd-ee-01"),
+                    ("RSSI", "-69"),
+                    ("Battery-Voltage", "4.1"),
+                    ("FW-Version", "1.6.2"),
+                    // The proxy appended the last hop; the first came from the caller.
+                    ("X-Forwarded-For", "6.6.6.6, 203.0.113.7"),
+                ],
+            );
+            let (_, body) = send_json(&f.state, from_peer(display, "127.0.0.1")).await;
+            let path = body["image_url"]
+                .as_str()
+                .unwrap()
+                .strip_prefix(BASE)
+                .unwrap()
+                .to_owned();
+            send(&f.state, get(&path, &[])).await;
+            send(&f.state, get("/healthz", &[])).await;
+        })
+        .await;
+
+        let display = line_with(&logs, "GET /api/display 200");
+        for field in [
+            "tablica::access",
+            " INFO ",
+            r#"device="kitchen""#,
+            r#"mac="AA:BB:CC:DD:EE:01""#,
+            "client=203.0.113.7",
+            "peer=127.0.0.1",
+            r#"rssi="-69""#,
+            r#"battery_voltage="4.1""#,
+            r#"fw_version="1.6.2""#,
+            &format!(r#"image_url="{BASE}/images/alpha-"#),
+        ] {
+            assert!(display.contains(field), "{field} missing: {display}");
+        }
+        assert!(!display.contains("reason="), "{display}");
+
+        let image = line_with(&logs, "GET /images/alpha-");
+        assert!(image.contains("bytes="), "{image}");
+        assert!(line_with(&logs, "GET /healthz 200").contains("DEBUG"));
+    }
+
+    #[tokio::test]
+    async fn access_log_trusts_forwarded_for_only_from_the_proxy() {
+        let f = fixture();
+        let cases = [
+            // Direct caller: its own header is ignored.
+            ("192.168.1.50", Some("1.2.3.4"), "client=192.168.1.50"),
+            // Proxy with an unparseable hop: fall back to the peer.
+            ("127.0.0.1", Some("1.2.3.4, garbage"), "client=127.0.0.1"),
+            ("127.0.0.1", None, "client=127.0.0.1"),
+            ("::1", Some("2001:db8::7"), "client=2001:db8::7"),
+        ];
+        for (peer, forwarded, expected) in cases {
+            let logs = captured_logs(async {
+                let headers: Vec<_> = forwarded
+                    .map(|v| ("X-Forwarded-For", v))
+                    .into_iter()
+                    .collect();
+                send(
+                    &f.state,
+                    from_peer(get("/preview/alpha.png", &headers), peer),
+                )
+                .await;
+            })
+            .await;
+            let line = line_with(&logs, "GET /preview/alpha.png 200");
+            assert!(line.contains(expected), "{peer} {forwarded:?}: {line}");
+            assert!(line.contains(&format!("peer={peer}")), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn access_log_never_records_credentials() {
+        let f = fixture();
+        let logs = captured_logs(async {
+            send(
+                &f.state,
+                get("/api/display", &[("Access-Token", "kitchen-key")]),
+            )
+            .await;
+            send(
+                &f.state,
+                get("/preview/alpha.png?api_key=sentinel-query&depth=2", &[]),
+            )
+            .await;
+            send(
+                &f.state,
+                get(
+                    "/api/display",
+                    &[("Access-Token", "sentinel-token"), ("ID", "sentinel-id")],
+                ),
+            )
+            .await;
+            send(&f.state, get("/api/setup", &[("ID", "sentinel-setup-id")])).await;
+        })
+        .await;
+        for secret in ["kitchen-key", "sentinel"] {
+            assert!(!logs.contains(secret), "{secret} leaked:\n{logs}");
+        }
+        // The path is logged without its query.
+        line_with(&logs, "GET /preview/alpha.png 200");
+        // A malformed ID is dropped, not logged as a MAC.
+        assert!(!line_with(&logs, "GET /api/display 401").contains("mac="));
+        assert!(!line_with(&logs, "GET /api/setup 404").contains("mac="));
+    }
+
+    #[tokio::test]
+    async fn access_log_names_the_device_the_handler_served() {
+        let f = fixture();
+        let logs = captured_logs(async {
+            // A re-provisioned device: stale kitchen key, office MAC. Setup serves office.
+            let (_, body) = send_json(
+                &f.state,
+                get(
+                    "/api/setup",
+                    &[("Access-Token", "kitchen-key"), ("ID", "AA:BB:CC:DD:EE:02")],
+                ),
+            )
+            .await;
+            assert_eq!(body["api_key"], "office-key");
+        })
+        .await;
+        let setup = line_with(&logs, "GET /api/setup 200");
+        assert!(setup.contains(r#"device="office""#), "{setup}");
+        assert!(
+            setup.contains(&format!(r#"image_url="{BASE}/preview/bravo.png?depth=1""#)),
+            "{setup}"
+        );
+    }
+
+    #[tokio::test]
+    async fn access_log_has_one_warn_per_refused_request() {
+        let f = fixture();
+        let logs = captured_logs(async {
+            send(
+                &f.state,
+                get(
+                    "/api/display",
+                    &[("Access-Token", "wrong"), ("ID", "AA:BB:CC:DD:EE:01")],
+                ),
+            )
+            .await;
+            send(&f.state, get("/api/display", &[("Access-Token", "wrong")])).await;
+            send(&f.state, get("/api/setup", &[("ID", "AA:BB:CC:DD:EE:99")])).await;
+            let log = Request::post("/api/log")
+                .header("Access-Token", "wrong")
+                .body(Body::from("{}"))
+                .unwrap();
+            send(&f.state, log).await;
+        })
+        .await;
+        let warns: Vec<_> = logs.lines().filter(|l| l.contains(" WARN ")).collect();
+        assert_eq!(warns.len(), 4, "{logs}");
+        assert!(
+            warns.iter().all(|l| l.contains("tablica::access")),
+            "{logs}"
+        );
+
+        let stale = line_with(&logs, r#"mac="AA:BB:CC:DD:EE:01""#);
+        assert!(
+            stale.contains(r#"reason="unknown access token; ID is configured device kitchen""#),
+            "{stale}"
+        );
+        assert!(!stale.contains("device="), "{stale}");
+        let setup = line_with(&logs, "GET /api/setup 404");
+        assert!(setup.contains(r#"reason="unknown device""#), "{setup}");
+        let log = line_with(&logs, "POST /api/log 401");
+        assert!(log.contains(r#"reason="unknown access token""#), "{log}");
     }
 
     #[tokio::test]
