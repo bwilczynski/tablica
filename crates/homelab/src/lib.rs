@@ -106,6 +106,11 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_is_empty() {
+        assert!(HomelabDashboard.diagnostics(Utc::now()).is_empty());
+    }
+
+    #[test]
     fn embedded_bundle_renders_a_valid_png() {
         use tablica_core::config::BitDepth;
         use tablica_core::dashboard::Active;

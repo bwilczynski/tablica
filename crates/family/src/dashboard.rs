@@ -25,6 +25,7 @@ use tablica_core::config::{Loaded, Secrets};
 use tablica_core::dashboard::{
     Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
 };
+use tablica_core::diagnostics::{Section, source_row};
 use tablica_core::polling::{IntervalPolicy, run_poller};
 
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -202,6 +203,22 @@ impl Dashboard for FamilyDashboard {
                 .collect::<Vec<_>>(),
         })
     }
+
+    fn diagnostics(&self, now: DateTime<Utc>) -> Vec<Section> {
+        let caches = &self.caches;
+        let mut rows = vec![
+            source_row("calendar", &caches.calendar, now, CALENDAR_MAX_AGE),
+            source_row("weather", &caches.weather, now, WEATHER_MAX_AGE),
+        ];
+        for (kid, cache) in self.cfg.kids.iter().zip(&caches.timetables) {
+            let label = format!("timetable {}", kid.label);
+            rows.push(source_row(&label, cache, now, TIMETABLE_MAX_AGE));
+        }
+        vec![Section {
+            title: "Sources".to_owned(),
+            rows,
+        }]
+    }
 }
 
 /// External endpoints; tests point them at mock servers.
@@ -283,6 +300,28 @@ mod tests {
             minijinja::Value::from_serialize(view::build(&sample.inputs(now)))
         );
         assert_eq!(family.switch_at(), Some(sample.cfg.switch_at));
+    }
+
+    #[test]
+    fn diagnostics_lists_every_source() {
+        use tablica_core::diagnostics::Status;
+        let dir = tempfile::tempdir().unwrap();
+        let family = dashboard_in(&dir, false);
+        let sections = family.diagnostics(Utc::now());
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, "Sources");
+        let mut expected = vec!["calendar".to_owned(), "weather".to_owned()];
+        expected.extend(
+            family
+                .cfg
+                .kids
+                .iter()
+                .map(|k| format!("timetable {}", k.label)),
+        );
+        assert_eq!(expected.len(), 4);
+        let labels: Vec<_> = sections[0].rows.iter().map(|r| r.label.clone()).collect();
+        assert_eq!(labels, expected);
+        assert!(sections[0].rows.iter().all(|r| r.status == Status::Bad));
     }
 
     #[test]
