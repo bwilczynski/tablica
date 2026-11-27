@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{ConfigError, Secrets};
+use crate::diagnostics::Section;
 
 /// What an entry's `parse` returns: `Ok(None)` when the dashboard is inactive.
 pub type ParseResult = Result<Option<Box<dyn ParsedDashboard>>, ConfigError>;
@@ -54,6 +55,10 @@ pub trait Dashboard: Send + Sync {
     }
     /// JSON for `/healthz`.
     fn health(&self, now: DateTime<Utc>) -> serde_json::Value;
+    /// Sections for the device diagnostics screen. Reads caches only.
+    fn diagnostics(&self, _now: DateTime<Utc>) -> Vec<Section> {
+        Vec::new()
+    }
 }
 
 pub struct View {
