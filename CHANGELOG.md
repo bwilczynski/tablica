@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5](https://github.com/bwilczynski/tablica/compare/v0.1.4...v0.1.5) (2026-11-27)
+
+
+### Added
+
+* log every device API request in one access line ([a5886f7](https://github.com/bwilczynski/tablica/commit/a5886f7ea537680a0d4e1766f6cc861201998568))
+
+
+### Fixed
+
+* log the device MAC when a display token is unknown ([c23a8a3](https://github.com/bwilczynski/tablica/commit/c23a8a3139548123fe51b1948b53b3ce8280c233))
+
 ## [0.1.4](https://github.com/bwilczynski/tablica/compare/v0.1.3...v0.1.4) (2026-11-27)
 
 
