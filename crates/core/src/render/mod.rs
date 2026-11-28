@@ -256,6 +256,7 @@ mod tests {
         fn spawn_pollers(
             self: Arc<Self>,
             _shutdown: tokio_util::sync::CancellationToken,
+            _recorder: crate::metrics::Recorder,
         ) -> Vec<tokio::task::JoinHandle<()>> {
             Vec::new()
         }

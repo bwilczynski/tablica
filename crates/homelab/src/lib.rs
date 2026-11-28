@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use std::sync::Arc;
 use tablica_core::config::Secrets;
+use tablica_core::metrics::Recorder;
 
 use chrono::{DateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
@@ -34,7 +35,11 @@ impl Dashboard for HomelabDashboard {
         minijinja_embed::load_templates!(*env);
     }
 
-    fn spawn_pollers(self: Arc<Self>, _shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+    fn spawn_pollers(
+        self: Arc<Self>,
+        _shutdown: CancellationToken,
+        _recorder: Recorder,
+    ) -> Vec<JoinHandle<()>> {
         Vec::new()
     }
 

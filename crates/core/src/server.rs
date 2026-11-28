@@ -12,6 +12,7 @@ use crate::config::Loaded;
 use crate::dashboard::{Active, Dashboard, PrepareContext};
 use crate::device_api::{self, AppState, Clock, ImageStore};
 use crate::history::History;
+use crate::metrics::Recorder;
 use crate::render::{Renderer, TemplateSource};
 
 pub struct ServeOptions {
@@ -84,9 +85,15 @@ where
         .await
         .with_context(|| format!("binding {}", cfg.listen))?;
     let stop = CancellationToken::new();
+    let device_dashboards: Vec<(String, String)> = cfg
+        .devices
+        .iter()
+        .map(|d| (d.name.clone(), d.dashboard.clone()))
+        .collect();
+    let recorder = Recorder::new(&device_dashboards);
     let pollers: Vec<_> = dashboards
         .into_iter()
-        .flat_map(|d| d.spawn_pollers(stop.clone()))
+        .flat_map(|d| d.spawn_pollers(stop.clone(), recorder.clone()))
         .collect();
 
     let app = device_api::router(state);
@@ -172,7 +179,11 @@ mod tests {
             self.stub.load_templates(env);
         }
 
-        fn spawn_pollers(self: Arc<Self>, shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+        fn spawn_pollers(
+            self: Arc<Self>,
+            shutdown: CancellationToken,
+            _recorder: crate::metrics::Recorder,
+        ) -> Vec<JoinHandle<()>> {
             self.spawned.fetch_add(1, Ordering::SeqCst);
             let hang = self.hang;
             vec![tokio::spawn(async move {
