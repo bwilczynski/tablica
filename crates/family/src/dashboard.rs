@@ -26,8 +26,10 @@ use tablica_core::dashboard::{
     Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, SourceState, View,
 };
 use tablica_core::diagnostics::{Section, source_row};
+use tablica_core::metrics::Recorder;
 use tablica_core::polling::{IntervalPolicy, run_poller};
 
+const NAME: &str = "family";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -74,7 +76,11 @@ impl Dashboard for FamilyDashboard {
 
     /// Starts the calendar poller, the weather poller and one Librus poller per
     /// kid. They run until `shutdown` is cancelled.
-    fn spawn_pollers(self: Arc<Self>, shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+    fn spawn_pollers(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+        recorder: Recorder,
+    ) -> Vec<JoinHandle<()>> {
         let tz = self.tz;
         let mut handles = Vec::new();
 
@@ -86,6 +92,7 @@ impl Dashboard for FamilyDashboard {
                 tz,
                 policy,
                 shutdown.clone(),
+                recorder.source(NAME, "calendar"),
                 move || {
                     let this = this.clone();
                     async move {
@@ -110,6 +117,7 @@ impl Dashboard for FamilyDashboard {
                 tz,
                 policy,
                 shutdown.clone(),
+                recorder.source(NAME, "weather"),
                 move || {
                     let this = this.clone();
                     async move {
@@ -147,6 +155,7 @@ impl Dashboard for FamilyDashboard {
                 tz,
                 policy,
                 shutdown.clone(),
+                recorder.source(NAME, &timetable_source_id(index)),
                 move || {
                     let this = this.clone();
                     async move {
@@ -260,10 +269,7 @@ impl Default for Endpoints {
 }
 
 pub fn entry() -> DashboardEntry {
-    DashboardEntry {
-        name: "family",
-        parse,
-    }
+    DashboardEntry { name: NAME, parse }
 }
 
 /// The kids from the family section as `load` parsed it, for `capture librus`:

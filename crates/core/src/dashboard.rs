@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cache::{CacheStatus, is_stale};
 use crate::config::{ConfigError, Secrets};
 use crate::diagnostics::Section;
+use crate::metrics::Recorder;
 
 /// What an entry's `parse` returns: `Ok(None)` when the dashboard is inactive.
 pub type ParseResult = Result<Option<Box<dyn ParsedDashboard>>, ConfigError>;
@@ -47,7 +48,11 @@ pub trait Dashboard: Send + Sync {
     /// Registers the embedded templates into this dashboard's own environment.
     fn load_templates(&self, env: &mut minijinja::Environment<'static>);
     /// Starts background pollers. Infallible.
-    fn spawn_pollers(self: Arc<Self>, shutdown: CancellationToken) -> Vec<JoinHandle<()>>;
+    fn spawn_pollers(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+        recorder: Recorder,
+    ) -> Vec<JoinHandle<()>>;
     /// Template name and context for a render at `now`. Reads caches only.
     fn view(&self, now: DateTime<Tz>) -> anyhow::Result<View>;
     /// A local time of day the device should wake just after.

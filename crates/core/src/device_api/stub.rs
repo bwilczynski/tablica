@@ -45,7 +45,11 @@ impl Dashboard for StubDashboard {
             .expect("stub template is valid");
     }
 
-    fn spawn_pollers(self: Arc<Self>, _shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+    fn spawn_pollers(
+        self: Arc<Self>,
+        _shutdown: CancellationToken,
+        _recorder: crate::metrics::Recorder,
+    ) -> Vec<JoinHandle<()>> {
         self.spawned.fetch_add(1, Ordering::SeqCst);
         Vec::new()
     }

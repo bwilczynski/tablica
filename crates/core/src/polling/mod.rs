@@ -12,6 +12,8 @@ use chrono_tz::Tz;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::metrics::SourceMetrics;
+
 pub use backoff::backoff_delay;
 pub use interval::IntervalPolicy;
 pub use jitter::{between, jittered};
@@ -49,6 +51,7 @@ pub async fn run_poller<P, F, Fut>(
     tz: Tz,
     mut policy: P,
     shutdown: CancellationToken,
+    metrics: SourceMetrics,
     mut job: F,
 ) where
     P: PollPolicy,
@@ -70,11 +73,13 @@ pub async fn run_poller<P, F, Fut>(
             target = later;
             continue;
         }
+        let started = tokio::time::Instant::now();
         let outcome = tokio::select! {
             biased;
             () = shutdown.cancelled() => return,
             o = job() => o,
         };
+        metrics.observe(outcome, started.elapsed());
         target = policy.next_run(now_in(tz), outcome);
     }
 }
@@ -86,6 +91,7 @@ fn now_in(tz: Tz) -> DateTime<Tz> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::Recorder;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
@@ -124,6 +130,7 @@ mod tests {
             chrono_tz::UTC,
             policy,
             shutdown.clone(),
+            Recorder::new(&[]).source("t", "t"),
             move || {
                 let r = r.clone();
                 async move {
@@ -155,6 +162,7 @@ mod tests {
             chrono_tz::UTC,
             policy,
             shutdown.clone(),
+            Recorder::new(&[]).source("t", "t"),
             move || {
                 let (r, s) = (r.clone(), s.clone());
                 async move {
@@ -200,6 +208,7 @@ mod tests {
             chrono_tz::UTC,
             Postponing { postponed: false },
             shutdown.clone(),
+            Recorder::new(&[]).source("t", "t"),
             move || {
                 let r = r.clone();
                 async move {
@@ -220,5 +229,64 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1);
         shutdown.cancel();
         task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn records_outcomes_and_durations() {
+        let recorder = Recorder::new(&[]);
+        let shutdown = CancellationToken::new();
+        let policy = Scripted {
+            first: chrono::Duration::minutes(-5),
+            next: chrono::Duration::minutes(-5),
+        };
+        let runs = Arc::new(AtomicU32::new(0));
+        let (r, s) = (runs.clone(), shutdown.clone());
+        let task = tokio::spawn(run_poller(
+            "test".into(),
+            chrono_tz::UTC,
+            policy,
+            shutdown.clone(),
+            recorder.source("family", "calendar"),
+            move || {
+                let (r, s) = (r.clone(), s.clone());
+                async move {
+                    let n = r.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    match n {
+                        0 => Outcome::Ok,
+                        1 => Outcome::Failed,
+                        _ => {
+                            s.cancel();
+                            Outcome::Rejected
+                        }
+                    }
+                }
+            },
+        ));
+        task.await.unwrap();
+        let mut registry = prometheus_client::registry::Registry::default();
+        recorder.register(&mut registry);
+        let mut out = String::new();
+        prometheus_client::encoding::text::encode(&mut out, &registry).unwrap();
+        for o in ["ok", "failed", "rejected"] {
+            let line = format!(
+                "tablica_source_fetches_total{{dashboard=\"family\",source=\"calendar\",outcome=\"{o}\"}} 1"
+            );
+            assert!(out.contains(&line), "missing {line} in\n{out}");
+        }
+        let base = "tablica_source_fetch_duration_seconds";
+        let labels = "dashboard=\"family\",source=\"calendar\"";
+        assert!(
+            out.contains(&format!("{base}_count{{{labels}}} 3")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{base}_sum{{{labels}}} 6.0")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("{base}_bucket{{le=\"2.5\",{labels}}} 3")),
+            "{out}"
+        );
     }
 }
