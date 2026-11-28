@@ -130,7 +130,7 @@ mod tests {
             chrono_tz::UTC,
             policy,
             shutdown.clone(),
-            Recorder::new(&[]).source("t", "t"),
+            Recorder::new(&[], &[]).source("t", "t"),
             move || {
                 let r = r.clone();
                 async move {
@@ -162,7 +162,7 @@ mod tests {
             chrono_tz::UTC,
             policy,
             shutdown.clone(),
-            Recorder::new(&[]).source("t", "t"),
+            Recorder::new(&[], &[]).source("t", "t"),
             move || {
                 let (r, s) = (r.clone(), s.clone());
                 async move {
@@ -208,7 +208,7 @@ mod tests {
             chrono_tz::UTC,
             Postponing { postponed: false },
             shutdown.clone(),
-            Recorder::new(&[]).source("t", "t"),
+            Recorder::new(&[], &[]).source("t", "t"),
             move || {
                 let r = r.clone();
                 async move {
@@ -233,7 +233,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn records_outcomes_and_durations() {
-        let recorder = Recorder::new(&[]);
+        let recorder = Recorder::new(&[], &[]);
         let shutdown = CancellationToken::new();
         let policy = Scripted {
             first: chrono::Duration::minutes(-5),

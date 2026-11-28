@@ -55,7 +55,8 @@ pub fn prepare_state(
         .iter()
         .map(|d| (d.name.clone(), d.dashboard.clone()))
         .collect();
-    let recorder = Recorder::new(&device_dashboards);
+    let dashboard_names: Vec<&str> = active.keys().copied().collect();
+    let recorder = Recorder::new(&device_dashboards, &dashboard_names);
     let state = AppState {
         cfg,
         dashboards: Arc::new(active),
@@ -637,7 +638,7 @@ mod tests {
             ],
         );
         let history = History::open(dir.path(), Arc::new(Utc::now));
-        let recorder = Recorder::new(&[("kitchen".into(), "stubs".into())]);
+        let recorder = Recorder::new(&[("kitchen".into(), "stubs".into())], &["stubs"]);
 
         seed_metrics(&history, &recorder, &[kitchen()], t0);
 

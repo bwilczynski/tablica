@@ -65,11 +65,14 @@ impl Dashboard for FailingSource {
 fn sample_scrape(dir: &Path) -> String {
     let at = now();
     let clock: tablica_core::device_api::Clock = Arc::new(move || at);
-    let recorder = Recorder::new(&[
-        ("kitchen".into(), "testing".into()),
-        ("hall".into(), "testing".into()),
-        ("attic".into(), "testing".into()),
-    ]);
+    let recorder = Recorder::new(
+        &[
+            ("kitchen".into(), "testing".into()),
+            ("hall".into(), "testing".into()),
+            ("attic".into(), "testing".into()),
+        ],
+        &["testing"],
+    );
 
     // Kitchen: full telemetry, with a steady drain so days-left is derived.
     let hours = 96;

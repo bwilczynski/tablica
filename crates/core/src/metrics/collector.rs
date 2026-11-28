@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn scrape_contains_inventory_for_never_seen() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
         let body = scrape(&r, stub_active(), History::disabled(), dir.path());
         assert_eq!(
             lines_starting(&body, "tablica_device_configured").len(),
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn scrape_omits_next_checkin_when_out_of_range() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
         let at = now() - Duration::minutes(10);
         for (device, next) in [("kitchen", i64::MAX), ("hall", 900)] {
             r.record_reading(
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn scrape_device_state() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
         let at = now() - Duration::minutes(10);
         r.record_reading(
             "kitchen",
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn scrape_with_history_disabled() {
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
 
         let dir = tempfile::tempdir().unwrap();
         let body = scrape(&r, stub_active(), History::disabled(), dir.path());
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn scrape_sources() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
         let mut active = stub_active();
         active.insert("family", Arc::new(Sourced) as Arc<dyn Dashboard>);
         let body = scrape(&r, active, History::disabled(), dir.path());
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn scrape_sanitises_garbage_labels() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
         r.record_reading(
             "kitchen",
             &Reading {
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn info_absent_fields_encode_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Recorder::new(&configured());
+        let r = Recorder::new(&configured(), &["stub"]);
         r.record_reading(
             "kitchen",
             &Reading {
