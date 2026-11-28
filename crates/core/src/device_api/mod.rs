@@ -561,10 +561,13 @@ mod tests {
                 clock: Arc::new(move || fixed),
                 history,
                 diag_reads: Arc::new(Semaphore::new(1)),
-                recorder: Recorder::new(&[
-                    ("kitchen".to_owned(), "alpha".to_owned()),
-                    ("office".to_owned(), "bravo".to_owned()),
-                ]),
+                recorder: Recorder::new(
+                    &[
+                        ("kitchen".to_owned(), "alpha".to_owned()),
+                        ("office".to_owned(), "bravo".to_owned()),
+                    ],
+                    &["alpha", "bravo"],
+                ),
             },
             alpha,
         }
@@ -1257,9 +1260,46 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(!text.contains("outcome=\"refused\""), "{text}");
+        assert!(
+            text.contains(
+                "tablica_http_requests_total{route=\"/api/display\",status=\"401\",outcome=\"refused\"} 0"
+            ),
+            "{text}"
+        );
         let state = f.state.recorder.devices().get("kitchen").unwrap();
         assert!(state.last_reply.is_none());
+    }
+
+    /// One counter sample from an encoded scrape; `None` when the series is absent.
+    fn sample(text: &str, series: &str) -> Option<f64> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(series)?.strip_prefix(' '))
+            .map(|v| v.parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn first_problem_request_and_render_failure_are_seen() {
+        let f = fixture();
+        let refused =
+            r#"tablica_http_requests_total{route="/api/log",status="401",outcome="refused"}"#;
+        let failed = r#"tablica_render_failures_total{dashboard="alpha",kind="preview"}"#;
+        let before = encoded(&f.state);
+        assert_eq!(sample(&before, refused), Some(0.0), "{before}");
+        assert_eq!(sample(&before, failed), Some(0.0), "{before}");
+
+        let log = Request::post("/api/log")
+            .header("Access-Token", "nope")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, _) = send(&f.state, log).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        f.alpha.fail_render.store(true, Ordering::SeqCst);
+        let (status, _, _) = send(&f.state, get("/preview/alpha.png", &[])).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let after = encoded(&f.state);
+        assert_eq!(sample(&after, refused), Some(1.0), "{after}");
+        assert_eq!(sample(&after, failed), Some(1.0), "{after}");
     }
 
     #[tokio::test]

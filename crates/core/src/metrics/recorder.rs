@@ -17,6 +17,26 @@ const SOURCE_BUCKETS: [f64; 9] = [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.
 const HTTP_BUCKETS: [f64; 10] = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
 const RENDER_BUCKETS: [f64; 8] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0];
 
+/// Every `(route, status, outcome)` problem request the main router can answer,
+/// pre-created at zero so `increase()` sees the first one. Keep in step with the
+/// handlers in `device_api`:
+///
+/// - `/api/setup` 404 refused: no configured device has the `ID` MAC;
+/// - `/api/display` 401 refused: unknown `Access-Token`;
+/// - `/api/display` 503 unavailable: the render failed and there is no previous image;
+/// - `/api/log` 401 refused: unknown `Access-Token`.
+///
+/// The other routes (`/images/{file}`, `/preview/{file}`, `/healthz`, `unmatched`)
+/// never mark a request refused or unavailable, so they have no problem series.
+const PROBLEM_REQUESTS: [(&str, u16, HttpOutcome); 4] = [
+    ("/api/setup", 404, HttpOutcome::Refused),
+    ("/api/display", 401, HttpOutcome::Refused),
+    ("/api/display", 503, HttpOutcome::Unavailable),
+    ("/api/log", 401, HttpOutcome::Refused),
+];
+
+const RENDER_KINDS: [RenderKind; 3] = [RenderKind::Device, RenderKind::Preview, RenderKind::Diag];
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ResetLabels {
     device: String,
@@ -143,6 +163,21 @@ fn fetch_labels(dashboard: &str, source: &str, outcome: &str) -> FetchLabels {
     }
 }
 
+fn http_labels(route: &str, status: u16, outcome: HttpOutcome) -> HttpLabels {
+    HttpLabels {
+        route: route.to_owned(),
+        status: status.to_string(),
+        outcome: outcome.as_str().to_owned(),
+    }
+}
+
+fn render_labels(dashboard: &str, kind: RenderKind) -> RenderLabels {
+    RenderLabels {
+        dashboard: dashboard.to_owned(),
+        kind: kind.as_str().to_owned(),
+    }
+}
+
 fn source_labels(dashboard: &str, source: &str) -> SourceLabels {
     SourceLabels {
         dashboard: dashboard.to_owned(),
@@ -151,8 +186,10 @@ fn source_labels(dashboard: &str, source: &str) -> SourceLabels {
 }
 
 impl Recorder {
-    /// `devices` is `(name, dashboard)` per configured device.
-    pub fn new(devices: &[(String, String)]) -> Recorder {
+    /// `devices` is `(name, dashboard)` per configured device; `dashboards` names
+    /// every active dashboard. Pre-creates at zero the resets per device, the
+    /// `PROBLEM_REQUESTS` and the render failures per dashboard and kind.
+    pub fn new(devices: &[(String, String)], dashboards: &[&str]) -> Recorder {
         let inner = Inner {
             devices: DeviceStore::default(),
             configured: devices.to_vec(),
@@ -170,6 +207,18 @@ impl Recorder {
                     device: name.clone(),
                     reason: reason.to_owned(),
                 });
+            }
+        }
+        for (route, status, outcome) in PROBLEM_REQUESTS {
+            let _ = inner
+                .http_requests
+                .get_or_create_owned(&http_labels(route, status, outcome));
+        }
+        for dashboard in dashboards {
+            for kind in RENDER_KINDS {
+                let _ = inner
+                    .render_failures
+                    .get_or_create_owned(&render_labels(dashboard, kind));
             }
         }
         Recorder(Arc::new(inner))
@@ -224,11 +273,7 @@ impl Recorder {
     pub fn http(&self, route: &str, status: u16, outcome: HttpOutcome, elapsed: Duration) {
         self.0
             .http_requests
-            .get_or_create_owned(&HttpLabels {
-                route: route.to_owned(),
-                status: status.to_string(),
-                outcome: outcome.as_str().to_owned(),
-            })
+            .get_or_create_owned(&http_labels(route, status, outcome))
             .inc();
         self.0
             .http_duration
@@ -239,10 +284,7 @@ impl Recorder {
     }
 
     pub fn render(&self, dashboard: &str, kind: RenderKind, elapsed: Duration, ok: bool) {
-        let l = RenderLabels {
-            dashboard: dashboard.to_owned(),
-            kind: kind.as_str().to_owned(),
-        };
+        let l = render_labels(dashboard, kind);
         if ok {
             self.0
                 .render_duration
@@ -316,7 +358,7 @@ mod tests {
     use prometheus_client::encoding::text::encode;
 
     fn recorder() -> (Recorder, Registry) {
-        let r = Recorder::new(&[("kitchen".into(), "family".into())]);
+        let r = Recorder::new(&[("kitchen".into(), "family".into())], &["family"]);
         let mut reg = Registry::default();
         r.register(&mut reg);
         (r, reg)
@@ -379,6 +421,33 @@ mod tests {
             t.contains(
                 r#"tablica_device_resets_total{device="kitchen",reason="ESP_RST_BROWNOUT"} 0"#
             ),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn problem_series_zero_initialised() {
+        let (_r, reg) = recorder();
+        let t = text(&reg);
+        for (route, status, outcome) in [
+            ("/api/setup", 404, "refused"),
+            ("/api/display", 401, "refused"),
+            ("/api/display", 503, "unavailable"),
+            ("/api/log", 401, "refused"),
+        ] {
+            let line = format!(
+                r#"tablica_http_requests_total{{route="{route}",status="{status}",outcome="{outcome}"}} 0"#
+            );
+            assert!(t.contains(&line), "{line}\n{t}");
+        }
+        for kind in ["device", "preview", "diag"] {
+            let line =
+                format!(r#"tablica_render_failures_total{{dashboard="family",kind="{kind}"}} 0"#);
+            assert!(t.contains(&line), "{line}\n{t}");
+        }
+        assert!(!t.contains("outcome=\"served\""), "{t}");
+        assert!(
+            !t.contains("tablica_http_request_duration_seconds_count"),
             "{t}"
         );
     }
