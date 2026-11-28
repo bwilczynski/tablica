@@ -438,6 +438,7 @@ mod tests {
             api_key: "key".into(),
             dashboard: "stubs".into(),
             bit_depth: crate::config::BitDepth::One,
+            diagnostics_button: false,
         }
     }
 

@@ -101,6 +101,7 @@ fn device(name: &str, key: &str, dashboard: &str) -> Device {
         api_key: key.into(),
         dashboard: dashboard.into(),
         bit_depth: BitDepth::Two,
+        diagnostics_button: false,
     }
 }
 

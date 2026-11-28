@@ -153,3 +153,74 @@ async fn serves_with_unusable_history() {
     let resp = router(state.clone()).oneshot(log).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
+
+#[tokio::test]
+async fn diagnostics_button_returns_to_dashboard_on_double_click_or_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_setup(dir.path());
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        config,
+        text.replace(
+            "dashboard = \"homelab\"",
+            "dashboard = \"homelab\"\ndiagnostics_button = true",
+        ),
+    )
+    .unwrap();
+    let state = app_at(dir.path(), 23, 0);
+    let app = router(state.clone());
+    let display = |special| {
+        let app = app.clone();
+        async move {
+            let mut req = Request::get("/api/display")
+                .header("Access-Token", "office-key")
+                .header("Battery-Voltage", "4.10");
+            if special {
+                req = req.header("special_function", "true");
+            }
+            let res = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            serde_json::from_slice::<Value>(&res.into_body().collect().await.unwrap().to_bytes())
+                .unwrap()
+        }
+    };
+    let fetch_image = |reply: &Value| {
+        let req = Request::get(format!(
+            "/images/{}.png",
+            reply["filename"].as_str().unwrap()
+        ))
+        .body(Body::empty())
+        .unwrap();
+        let app = app.clone();
+        async move {
+            let res = app.oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            res.into_body().collect().await.unwrap().to_bytes()
+        }
+    };
+    let main = display(false).await;
+    assert_eq!(main["special_function"], "guest_mode");
+    for double_click_to_return in [true, false, true] {
+        let battery = display(true).await;
+        assert_eq!(battery["action"], "guest_mode");
+        assert_eq!(battery["refresh_rate"], 120);
+        assert_ne!(battery["filename"], main["filename"]);
+        // An HTTP retry before the first image download still requests diagnostics.
+        let retry = display(true).await;
+        assert_eq!(retry["refresh_rate"], 120);
+        let bytes = fetch_image(&retry).await;
+        assert_eq!(fetch_image(&retry).await, bytes);
+        let png = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        assert_eq!(png.info().bit_depth, png::BitDepth::One);
+        let back = display(double_click_to_return).await;
+        assert_eq!(back["filename"], main["filename"]);
+        assert_eq!(back["refresh_rate"], main["refresh_rate"]);
+        assert_eq!(back["maximum_compatibility"], true);
+        if double_click_to_return {
+            assert_eq!(back["action"], "guest_mode");
+            fetch_image(&back).await;
+        }
+    }
+}

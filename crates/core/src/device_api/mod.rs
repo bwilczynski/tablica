@@ -7,6 +7,7 @@ pub mod refresh;
 pub(crate) mod stub;
 mod telemetry;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,7 +17,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -50,7 +51,33 @@ pub struct AppState {
     pub recorder: Recorder,
 }
 
+const DIAG_SECONDS: u32 = 120;
+
+#[derive(Default)]
+struct ButtonState {
+    diagnostics: bool,
+    /// Both guest-mode actions fetch a PNG, even when it is already cached.
+    /// A retried display request before that fetch should offer the same view.
+    pending_image: Option<PendingImage>,
+}
+
+struct PendingImage {
+    filename: String,
+    diagnostics: bool,
+}
+
+type ButtonStates = Arc<HashMap<String, tokio::sync::Mutex<ButtonState>>>;
+
 pub fn router(state: AppState) -> Router {
+    let buttons: ButtonStates = Arc::new(
+        state
+            .cfg
+            .devices
+            .iter()
+            .filter(|d| d.diagnostics_button)
+            .map(|d| (d.name.clone(), tokio::sync::Mutex::default()))
+            .collect(),
+    );
     Router::new()
         .route("/api/setup", get(setup))
         .route("/api/display", get(display))
@@ -62,6 +89,7 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             access_log::layer,
         ))
+        .layer(Extension(buttons))
         .with_state(state)
 }
 
@@ -176,7 +204,11 @@ async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Response {
     noted(response, Access::served(&device.name, Some(image_url)))
 }
 
-async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn display(
+    State(state): State<AppState>,
+    Extension(buttons): Extension<ButtonStates>,
+    headers: HeaderMap,
+) -> Response {
     let Some(device) = authenticate(&state.cfg, &headers) else {
         let response = (
             StatusCode::UNAUTHORIZED,
@@ -189,21 +221,54 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
     let dashboard = device.dashboard.as_str();
     let mut reading = telemetry::reading(&device.mac, now, &headers);
     let started = Instant::now();
-    let rendered =
-        render_blocking(&state, dashboard, now, device.bit_depth, RenderKind::Device).await;
+    let special = matches!(
+        header_str(&headers, "special_function"),
+        Some("true" | "guest_mode")
+    );
+    let mut button_state = match buttons.get(&device.name) {
+        Some(button) => Some(button.lock().await),
+        None => None,
+    };
+    let mut diagnostics = special && button_state.as_deref().is_some_and(|s| !s.diagnostics);
+    let rendered = if diagnostics {
+        reading.next_refresh = Some(i64::from(DIAG_SECONDS));
+        let input = diag_input(&state, device, None).await;
+        match render_diag(
+            &state,
+            dashboard,
+            crate::diagnostics::view::build_live(input, &reading),
+            device.bit_depth,
+        )
+        .await
+        {
+            Ok(png) => Ok(png),
+            Err(error) => {
+                warn!(device = %device.name, "diagnostics render failed: {error:#}");
+                diagnostics = false;
+                render_blocking(&state, dashboard, now, device.bit_depth, RenderKind::Device).await
+            }
+        }
+    } else {
+        render_blocking(&state, dashboard, now, device.bit_depth, RenderKind::Device).await
+    };
     if rendered.is_ok() {
         reading.render_ms = Some(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
     }
     let filename = match rendered {
         Ok(png) => {
             reading.image_bytes = i64::try_from(png.len()).ok();
-            state.images.put(&device.name, dashboard, png, now)
+            if diagnostics {
+                state.images.put_diagnostics(&device.name, png, now)
+            } else {
+                state.images.put(&device.name, dashboard, png, now)
+            }
         }
         Err(e) => {
             warn!(device = %device.name, "render failed: {e:#}");
             match state.images.latest(&device.name) {
                 Some(previous) => previous,
                 None => {
+                    reading.next_refresh = None;
                     state.recorder.record_reading(&device.name, &reading);
                     state.history.record_reading(reading);
                     let response = (
@@ -224,16 +289,32 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
     };
 
     let switch_at = state.dashboards.get(dashboard).and_then(|d| d.switch_at());
-    let rate = refresh_rate(
-        now.with_timezone(&state.cfg.timezone),
-        &state.cfg.schedule,
-        switch_at,
-    );
+    let rate = if diagnostics {
+        DIAG_SECONDS
+    } else {
+        refresh_rate(
+            now.with_timezone(&state.cfg.timezone),
+            &state.cfg.schedule,
+            switch_at,
+        )
+    };
+    // The kit's partial refresh can leave the wake logo on the panel when changing views.
+    let full_refresh = special || button_state.as_deref().is_some_and(|s| s.diagnostics);
+    if let Some(button) = button_state.as_deref_mut() {
+        button.pending_image = special.then(|| PendingImage {
+            filename: filename.clone(),
+            diagnostics,
+        });
+        if !special {
+            // A normal wake may redraw the dashboard entirely from device flash.
+            button.diagnostics = false;
+        }
+    }
     let image_url = format!("{}/images/{filename}.png", base_url(&state.cfg));
     reading.next_refresh = Some(i64::from(rate));
     state.recorder.record_reading(&device.name, &reading);
     state.history.record_reading(reading);
-    let response = Json(json!({
+    let mut reply = json!({
         "status": 0,
         "image_url": image_url,
         "filename": filename,
@@ -241,12 +322,17 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
         "reset_firmware": false,
         "update_firmware": false,
         "firmware_url": null,
-        "special_function": "none",
-        "maximum_compatibility": false,
+        "special_function": if device.diagnostics_button { "guest_mode" } else { "none" },
+        "maximum_compatibility": full_refresh,
         "temperature_profile": "default",
-    }))
-    .into_response();
-    noted(response, Access::served(&device.name, Some(image_url)))
+    });
+    if special {
+        reply["action"] = json!("guest_mode");
+    }
+    noted(
+        Json(reply).into_response(),
+        Access::served(&device.name, Some(image_url)),
+    )
 }
 
 /// The access-log note for a request whose `Access-Token` matches no device. The
@@ -286,10 +372,28 @@ async fn device_log(State(state): State<AppState>, headers: HeaderMap, body: Byt
     noted(StatusCode::NO_CONTENT.into_response(), note)
 }
 
-async fn image(State(state): State<AppState>, Path(file): Path<String>) -> Response {
-    file.strip_suffix(".png")
-        .and_then(|name| state.images.get(name))
-        .map_or_else(|| StatusCode::NOT_FOUND.into_response(), png_response)
+async fn image(
+    State(state): State<AppState>,
+    Extension(buttons): Extension<ButtonStates>,
+    Path(file): Path<String>,
+) -> Response {
+    let Some(name) = file.strip_suffix(".png") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((device, png)) = state.images.get_with_device(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // The firmware omits device headers on cross-origin image requests.
+    if let Some(button) = buttons.get(&device) {
+        let mut button = button.lock().await;
+        if let Some(pending) = &button.pending_image
+            && pending.filename == name
+        {
+            button.diagnostics = pending.diagnostics;
+            button.pending_image = None;
+        }
+    }
+    png_response(png)
 }
 
 #[derive(Deserialize)]
@@ -422,26 +526,34 @@ async fn diag_preview(state: &AppState, q: PreviewQuery) -> Response {
         Err(e) => return e.into_response(),
     };
     let view = build(diag_input(state, device, at).await);
-    let renderer = state.renderer.clone();
-    let started = Instant::now();
-    let rendered = tokio::task::spawn_blocking(move || renderer.render_diag(&view, depth)).await;
-    state.recorder.render(
-        &device.dashboard,
-        RenderKind::Diag,
-        started.elapsed(),
-        matches!(rendered, Ok(Ok(_))),
-    );
-    match rendered {
-        Ok(Ok(png)) => png_response(png),
-        Ok(Err(e)) => {
+    match render_diag(state, &device.dashboard, view, depth).await {
+        Ok(png) => png_response(png),
+        Err(e) => {
             warn!("diagnostics render failed: {e:#}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
-        Err(e) => {
-            warn!("diagnostics render task failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
     }
+}
+
+async fn render_diag(
+    state: &AppState,
+    dashboard: &str,
+    view: crate::dashboard::View,
+    depth: BitDepth,
+) -> anyhow::Result<Vec<u8>> {
+    let renderer = state.renderer.clone();
+    let started = Instant::now();
+    let result = tokio::task::spawn_blocking(move || renderer.render_diag(&view, depth))
+        .await
+        .context("diagnostics render task failed")
+        .and_then(|r| r);
+    state.recorder.render(
+        dashboard,
+        RenderKind::Diag,
+        started.elapsed(),
+        result.is_ok(),
+    );
+    result
 }
 
 async fn healthz(State(state): State<AppState>) -> Json<Value> {
@@ -498,6 +610,7 @@ mod tests {
             api_key: key.into(),
             dashboard: dashboard.into(),
             bit_depth: depth,
+            diagnostics_button: false,
         }
     }
 
@@ -1119,6 +1232,55 @@ mod tests {
             assert_eq!(body["status"], 500);
             assert_eq!(body["error"], "Device not found");
         }
+    }
+
+    #[tokio::test]
+    async fn failed_diagnostics_render_returns_the_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = fixture();
+        Arc::make_mut(&mut f.state.cfg).devices[0].diagnostics_button = true;
+        let (_, dashboard) = send_json(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        std::fs::write(dir.path().join("diag.html"), "{% invalid %}").unwrap();
+        f.state.renderer = Arc::new(
+            Renderer::new(TemplateSource::Dir(dir.path().into()), &f.state.dashboards).unwrap(),
+        );
+        let (status, reply) = send_json(
+            &f.state,
+            get(
+                "/api/display",
+                &[
+                    ("Access-Token", "kitchen-key"),
+                    ("special_function", "guest_mode"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["action"], "guest_mode");
+        assert_eq!(reply["filename"], dashboard["filename"]);
+        assert_eq!(reply["refresh_rate"], dashboard["refresh_rate"]);
+    }
+
+    #[tokio::test]
+    async fn disabled_button_returns_dashboard_for_a_previous_guest_assignment() {
+        let f = fixture();
+        let req = get(
+            "/api/display",
+            &[
+                ("Access-Token", "kitchen-key"),
+                ("special_function", "true"),
+            ],
+        );
+        let (status, reply) = send_json(&f.state, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["special_function"], "none");
+        assert_eq!(reply["action"], "guest_mode");
+        assert_eq!(reply["refresh_rate"], 900);
+        assert!(reply["filename"].as_str().unwrap().starts_with("alpha-"));
     }
 
     #[tokio::test]
