@@ -4,6 +4,7 @@ pub mod dashboard;
 pub mod device_api;
 pub mod diagnostics;
 pub mod history;
+pub mod metrics;
 pub mod polling;
 pub mod render;
 pub mod server;
