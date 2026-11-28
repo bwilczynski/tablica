@@ -10,6 +10,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, TransactionBehavior};
 use tracing::{debug, warn};
 
+use crate::metrics::MetricsSeed;
+use crate::metrics::devices::MAX_SAMPLES;
+
 use super::{
     CORRUPT_KEEP, DeviceHistory, DeviceLog, MAX_LOGS_PER_DEVICE, MAX_READINGS_PER_DEVICE,
     READ_DEADLINE, RETENTION_DAYS, Reading,
@@ -342,6 +345,84 @@ fn log_row(r: &Row) -> rusqlite::Result<DeviceLog> {
         wake_reason: r.get(5)?,
         raw: r.get(6)?,
     })
+}
+
+/// Reads the metrics seed for each of `macs`, in order, on a fresh read-only
+/// connection: every query in one read transaction, giving up after
+/// `READ_DEADLINE`.
+///
+/// Only rows with `at < t0.timestamp()` are read. History stores whole
+/// seconds, so a row from a previous process in the same second as `t0` is
+/// deliberately skipped; every live check-in has `at >= t0` and never appears
+/// here. The battery window holds the newest `MAX_SAMPLES` distinct seconds of
+/// the 7 days before the cutoff (the last-written row of a second wins),
+/// ascending.
+pub(crate) fn metrics_seed(
+    data_dir: &Path,
+    macs: &[String],
+    t0: DateTime<Utc>,
+) -> anyhow::Result<Vec<(String, MetricsSeed)>> {
+    let path = data_dir.join(DB_FILE);
+    if !path.exists() {
+        bail!("{} does not exist", path.display());
+    }
+    let mut conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(READ_DEADLINE)?;
+    let deadline = Instant::now() + READ_DEADLINE;
+    conn.progress_handler(1_000, Some(move || Instant::now() >= deadline))?;
+
+    let cutoff = t0.timestamp();
+    let since = cutoff - TimeDelta::days(7).num_seconds();
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let newest = |device: &str, cond: &str| -> rusqlite::Result<Option<Reading>> {
+        tx.query_row(
+            &format!(
+                "SELECT {READING_COLUMNS} FROM readings WHERE device = ?1 AND at < ?2{cond} \
+                 ORDER BY at DESC, id DESC LIMIT 1"
+            ),
+            rusqlite::params![device, cutoff],
+            reading_row,
+        )
+        .optional()
+    };
+    let mut out = Vec::with_capacity(macs.len());
+    for mac in macs {
+        let mut seed = MetricsSeed {
+            latest: newest(mac, "")?,
+            last_wake: newest(mac, " AND wake_ms IS NOT NULL AND wake_ms <> 0")?,
+            last_image: newest(mac, " AND image_bytes IS NOT NULL")?,
+            last_reply: newest(mac, " AND next_refresh IS NOT NULL")?,
+            last_reset: newest(
+                mac,
+                " AND reset_reason IS NOT NULL AND reset_reason <> 'ESP_RST_DEEPSLEEP'",
+            )?,
+            battery: Vec::new(),
+        };
+        let mut stmt = tx.prepare_cached(
+            "SELECT at, battery_v FROM readings WHERE device = ?1 AND at > ?2 AND at < ?3 \
+             AND battery_v IS NOT NULL AND battery_v <> 0 ORDER BY at DESC, id DESC",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![mac, since, cutoff])?;
+        let mut last_at = None;
+        while let Some(row) = rows.next()? {
+            let at: i64 = row.get(0)?;
+            if last_at == Some(at) {
+                continue;
+            }
+            if seed.battery.len() >= MAX_SAMPLES {
+                break;
+            }
+            last_at = Some(at);
+            seed.battery.push((timestamp(at)?, row.get(1)?));
+        }
+        seed.battery.reverse();
+        out.push((mac.clone(), seed));
+    }
+    tx.commit()?;
+    Ok(out)
 }
 
 /// Reads one device's history as of `at` on a fresh read-only connection,

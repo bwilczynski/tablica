@@ -20,6 +20,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tracing::{error, warn};
 
 use crate::device_api::Clock;
+use crate::metrics::MetricsSeed;
 pub use logs::parse_log_body;
 use store::Store;
 
@@ -314,6 +315,20 @@ impl History {
             .as_deref()
             .ok_or_else(|| anyhow!("history unavailable"))?;
         store::snapshot(dir, device, at)
+    }
+
+    /// Reads the metrics seed for each of `macs`, in order, from rows strictly
+    /// before `t0`'s second. Blocking; bounded by `READ_DEADLINE`.
+    pub fn metrics_seed(
+        &self,
+        macs: &[String],
+        t0: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<(String, MetricsSeed)>> {
+        let dir = self
+            .data_dir
+            .as_deref()
+            .ok_or_else(|| anyhow!("history unavailable"))?;
+        store::metrics_seed(dir, macs, t0)
     }
 
     /// Items dropped because the queue (or its byte budget) was full.
@@ -1000,5 +1015,148 @@ mod tests {
         assert!(!h.shutdown_within(Duration::from_millis(100)));
         assert!(start.elapsed() < Duration::from_secs(1));
         drop(release);
+    }
+
+    fn seed_reading(at: DateTime<Utc>, v: f64) -> Reading {
+        Reading {
+            battery_v: Some(v),
+            ..reading(at)
+        }
+    }
+
+    #[test]
+    fn metrics_seed_reads_last_known_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = open_at(dir.path(), now());
+        let t1 = now() - TimeDelta::hours(2);
+        let t2 = now() - TimeDelta::hours(1);
+        h.record_reading(Reading {
+            battery_v: Some(4.0),
+            wake_ms: Some(5000),
+            image_bytes: Some(100),
+            next_refresh: Some(900),
+            reset_reason: Some("ESP_RST_BROWNOUT".into()),
+            ..reading(t1)
+        });
+        h.record_reading(Reading {
+            battery_v: Some(3.9),
+            reset_reason: Some("ESP_RST_DEEPSLEEP".into()),
+            ..reading(t2)
+        });
+        h.flush();
+        let seeds = h.metrics_seed(&[MAC.to_owned()], now()).unwrap();
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].0, MAC);
+        let s = &seeds[0].1;
+        assert_eq!(s.latest.as_ref().unwrap().at, t2);
+        assert_eq!(s.last_wake.as_ref().unwrap().at, t1);
+        assert_eq!(s.last_image.as_ref().unwrap().at, t1);
+        assert_eq!(s.last_reply.as_ref().unwrap().at, t1);
+        assert_eq!(s.last_reset.as_ref().unwrap().at, t1);
+        assert_eq!(s.battery, vec![(t1, 4.0), (t2, 3.9)]);
+    }
+
+    #[test]
+    fn metrics_seed_respects_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = open_at(dir.path(), now());
+        let before = now() - TimeDelta::minutes(5);
+        h.record_reading(seed_reading(before, 4.0));
+        h.record_reading(seed_reading(now() + TimeDelta::minutes(5), 3.5));
+        h.flush();
+        let seeds = h.metrics_seed(&[MAC.to_owned()], now()).unwrap();
+        let s = &seeds[0].1;
+        assert_eq!(s.latest.as_ref().unwrap().at, before);
+        assert_eq!(s.battery, vec![(before, 4.0)]);
+    }
+
+    #[test]
+    fn metrics_seed_excludes_cutoff_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = open_at(dir.path(), now());
+        let t0 = t("2026-11-27T12:00:00.700Z");
+        h.record_reading(seed_reading(t("2026-11-27T12:00:00.200Z"), 3.5));
+        h.record_reading(seed_reading(t("2026-11-27T11:59:59Z"), 4.0));
+        h.flush();
+        let seeds = h.metrics_seed(&[MAC.to_owned()], t0).unwrap();
+        let s = &seeds[0].1;
+        assert_eq!(s.latest.as_ref().unwrap().at, t("2026-11-27T11:59:59Z"));
+        assert_eq!(s.battery, vec![(t("2026-11-27T11:59:59Z"), 4.0)]);
+    }
+
+    #[test]
+    fn delayed_seed_keeps_live_values() {
+        use crate::metrics::DeviceStore;
+        let dir = tempfile::tempdir().unwrap();
+        let h = open_at(dir.path(), now());
+        let old = now() - TimeDelta::seconds(60);
+        h.record_reading(seed_reading(old, 4.0));
+        h.flush();
+        let t0 = now();
+        let live = seed_reading(t0 + TimeDelta::seconds(1), 3.8);
+        let ds = DeviceStore::default();
+        ds.record(MAC, &live);
+        h.record_reading(live.clone());
+        h.flush();
+        for (mac, seed) in h.metrics_seed(&[MAC.to_owned()], t0).unwrap() {
+            ds.seed(&mac, seed);
+        }
+        let st = ds.get(MAC).unwrap();
+        assert_eq!(st.last_seen, Some(live.at));
+        assert_eq!(
+            st.samples.iter().copied().collect::<Vec<_>>(),
+            vec![(old, 4.0), (live.at, 3.8)]
+        );
+    }
+
+    #[test]
+    fn seed_battery_capped_and_deduped() {
+        use crate::metrics::devices::MAX_SAMPLES;
+        let dir = tempfile::tempdir().unwrap();
+        let base = now() - TimeDelta::days(1);
+        let mut store = Store::open(dir.path(), now()).unwrap();
+        for n in 0..3_000 {
+            store
+                .insert_reading(&seed_reading(base + TimeDelta::seconds(n), 4.0))
+                .unwrap();
+        }
+        // Duplicates the 10th-newest second (n = 2990), written later.
+        store
+            .insert_reading(&seed_reading(base + TimeDelta::seconds(2_990), 3.3))
+            .unwrap();
+        drop(store);
+        let h = open_at(dir.path(), now());
+        let seeds = h.metrics_seed(&[MAC.to_owned()], now()).unwrap();
+        let b = &seeds[0].1.battery;
+        assert_eq!(b.len(), MAX_SAMPLES);
+        assert!(b.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(b[0].0, base + TimeDelta::seconds(500));
+        assert_eq!(b.last().unwrap().0, base + TimeDelta::seconds(2_999));
+        let dup = b
+            .iter()
+            .find(|x| x.0 == base + TimeDelta::seconds(2_990))
+            .unwrap();
+        assert_eq!(dup.1, 3.3);
+        assert_eq!(b.iter().filter(|x| x.1 == 3.3).count(), 1);
+    }
+
+    #[test]
+    fn metrics_seed_ties_break_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = open_at(dir.path(), now());
+        let at = now() - TimeDelta::hours(1);
+        h.record_reading(seed_reading(at, 4.0));
+        h.record_reading(seed_reading(at, 3.7));
+        h.flush();
+        let seeds = h.metrics_seed(&[MAC.to_owned()], now()).unwrap();
+        let s = &seeds[0].1;
+        assert_eq!(s.latest.as_ref().unwrap().battery_v, Some(3.7));
+        assert_eq!(s.battery, vec![(at, 3.7)]);
+    }
+
+    #[test]
+    fn metrics_seed_unavailable() {
+        let h = History::disabled();
+        assert!(h.metrics_seed(&[MAC.to_owned()], now()).is_err());
     }
 }
