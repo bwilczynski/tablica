@@ -59,6 +59,8 @@ pub enum ConfigError {
     },
     #[error("dashboard name `{name}` {reason}")]
     InvalidDashboardName { name: String, reason: &'static str },
+    #[error("`metrics_listen` {addr} must differ from `listen`")]
+    MetricsListenClash { addr: SocketAddr },
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +68,8 @@ pub struct Config {
     pub timezone: Tz,
     pub base_url: String,
     pub listen: SocketAddr,
+    /// Where the Prometheus `/metrics` listener binds; `None` disables it.
+    pub metrics_listen: Option<SocketAddr>,
     pub data_dir: PathBuf,
     pub schedule: Schedule,
     pub devices: Vec<Device>,
@@ -133,6 +137,7 @@ struct RawConfig {
     timezone: Tz,
     base_url: String,
     listen: Option<SocketAddr>,
+    metrics_listen: Option<SocketAddr>,
     data_dir: Option<PathBuf>,
     #[serde(default)]
     schedule: RawSchedule,
@@ -347,13 +352,19 @@ pub fn load(
         }
     }
 
+    let listen = raw
+        .listen
+        .unwrap_or_else(|| "0.0.0.0:8080".parse().expect("valid default"));
+    if raw.metrics_listen == Some(listen) {
+        return Err(ConfigError::MetricsListenClash { addr: listen });
+    }
+
     Ok(Loaded {
         config: Config {
             timezone: raw.timezone,
             base_url: raw.base_url,
-            listen: raw
-                .listen
-                .unwrap_or_else(|| "0.0.0.0:8080".parse().expect("valid default")),
+            listen,
+            metrics_listen: raw.metrics_listen,
             data_dir: raw.data_dir.unwrap_or_else(|| PathBuf::from("/data")),
             schedule: Schedule {
                 wake: raw.schedule.wake,
@@ -409,6 +420,11 @@ mod tests {
     }
 
     const MINIMAL: &str = "timezone = \"Europe/Warsaw\"\nbase_url = \"http://x\"\n[alpha]\n";
+
+    /// `MINIMAL` with extra top-level keys placed before its first table.
+    fn top_level(keys: &str) -> String {
+        format!("{keys}\n{MINIMAL}")
+    }
 
     fn device(extra: &str) -> String {
         format!(
@@ -607,6 +623,25 @@ mod tests {
             matches!(&e, ConfigError::InvalidMac { device, .. } if device == "shed"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn metrics_listen_absent_is_none() {
+        assert_eq!(loaded(MINIMAL).config.metrics_listen, None);
+    }
+
+    #[test]
+    fn metrics_listen_parsed() {
+        let c = loaded(&top_level("metrics_listen = \"0.0.0.0:9101\"")).config;
+        assert_eq!(c.metrics_listen, Some("0.0.0.0:9101".parse().unwrap()));
+    }
+
+    #[test]
+    fn metrics_listen_equal_to_listen_rejected() {
+        let e = err(&top_level(
+            "listen = \"0.0.0.0:8080\"\nmetrics_listen = \"0.0.0.0:8080\"",
+        ));
+        assert!(matches!(e, ConfigError::MetricsListenClash { .. }), "{e}");
     }
 
     #[test]

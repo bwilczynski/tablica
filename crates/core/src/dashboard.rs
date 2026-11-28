@@ -67,8 +67,14 @@ pub struct View {
 }
 
 /// Core's own top-level config keys, which no dashboard may claim.
-const RESERVED: [&str; 6] = [
-    "timezone", "base_url", "listen", "data_dir", "schedule", "device",
+const RESERVED: [&str; 7] = [
+    "timezone",
+    "base_url",
+    "listen",
+    "metrics_listen",
+    "data_dir",
+    "schedule",
+    "device",
 ];
 
 /// Checks every entry name: `[a-z]{5,7}`, not a core key, unique. Five to seven
@@ -134,5 +140,7 @@ mod tests {
         for reserved in ["device", "listen"] {
             assert!(rejected(&[reserved]), "{reserved} accepted");
         }
+        // Longer than 7 characters, so name-length validation never reaches it.
+        assert!(RESERVED.contains(&"metrics_listen"));
     }
 }

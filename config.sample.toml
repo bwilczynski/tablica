@@ -1,5 +1,6 @@
 timezone = "Europe/Warsaw"
 base_url = "http://nas.local:8080"      # what devices use to fetch images
+# metrics_listen = "0.0.0.0:9101"  # Prometheus /metrics; keep it off the proxied port
 
 [schedule]
 wake = "06:00"

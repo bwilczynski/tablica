@@ -200,6 +200,7 @@ mod tests {
                 timezone: chrono_tz::Europe::Warsaw,
                 base_url: "http://x".into(),
                 listen,
+                metrics_listen: None,
                 data_dir: dir.path().to_owned(),
                 schedule: Schedule {
                     wake: NaiveTime::from_hms_opt(6, 0, 0).unwrap(),

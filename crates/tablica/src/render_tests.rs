@@ -111,6 +111,7 @@ fn state(data_dir: &Path, templates: TemplateSource) -> AppState {
         timezone: chrono_tz::Europe::Warsaw,
         base_url: BASE.into(),
         listen: "127.0.0.1:0".parse().unwrap(),
+        metrics_listen: None,
         data_dir: data_dir.to_owned(),
         schedule: Schedule {
             wake: time(6, 0),

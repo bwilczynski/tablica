@@ -507,6 +507,7 @@ mod tests {
             timezone: Warsaw,
             base_url: format!("{BASE}/"),
             listen: "127.0.0.1:0".parse().unwrap(),
+            metrics_listen: None,
             data_dir,
             schedule: Schedule {
                 wake: time(6, 0),
