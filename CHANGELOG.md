@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7](https://github.com/bwilczynski/tablica/compare/v0.1.6...v0.1.7) (2026-11-28)
+
+
+### Added
+
+* add metrics label sanitising ([88bf063](https://github.com/bwilczynski/tablica/commit/88bf0639c5b20e02e9755a46011b8531e8cf3a0f))
+* add metrics_listen config key ([9fa7928](https://github.com/bwilczynski/tablica/commit/9fa7928041440bdae3d0017f2d2d2efc16c180a1))
+* add the Grafana dashboard for tablica ([64e9747](https://github.com/bwilczynski/tablica/commit/64e9747a1fab6ec5e6dba5699fdd5820630bd0c6))
+* add the metrics recorder ([ba57352](https://github.com/bwilczynski/tablica/commit/ba573525cdba23b4c7bc07d5beb2f69a1c40f501))
+* collect device, source and process metrics at scrape time ([5ecf792](https://github.com/bwilczynski/tablica/commit/5ecf79299c81198ec7420cf4ba46fb441f4cecba))
+* expose source status for metrics ([e96f5d5](https://github.com/bwilczynski/tablica/commit/e96f5d57616a223499020fdb9d7e9ae4b544f96b))
+* keep per-device metrics state ([15900a0](https://github.com/bwilczynski/tablica/commit/15900a0736b4abb98b09a0d6fcd12b2661dcf007))
+* read the metrics seed from history ([7936fb8](https://github.com/bwilczynski/tablica/commit/7936fb83a3b9672e43dfa44840dd8b842cf178d8))
+* record HTTP, render and device metrics ([67fd9bb](https://github.com/bwilczynski/tablica/commit/67fd9bb937064d440ff392bb0002c2d208e0b4aa))
+* record poller outcomes and durations ([8a93c77](https://github.com/bwilczynski/tablica/commit/8a93c7764a3b76e01629364ecbf7bfe0fd56390a))
+* serve /metrics on metrics_listen ([2fc1212](https://github.com/bwilczynski/tablica/commit/2fc12128c384788e5b5b1b7b66755431fae09bd4))
+* start problem request and render failure series at zero ([b805ac9](https://github.com/bwilczynski/tablica/commit/b805ac918fa2e16745c8cd176840e4c119c8e443))
+
 ## [0.1.6](https://github.com/bwilczynski/tablica/compare/v0.1.5...v0.1.6) (2026-11-27)
 
 
