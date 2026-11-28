@@ -127,7 +127,10 @@ pub fn diag_view(input: DiagInput<'_>) -> DiagView {
 
     DiagView {
         device: device.name.clone(),
-        power: power_view(battery::power(latest, &history.readings)),
+        power: power_view(battery::power(
+            battery::latest_from(latest),
+            &battery::samples_from(&history.readings),
+        )),
         wifi: latest.and_then(wifi_view),
         wake: wake_view(derive::wake(latest, &history.readings, at)),
         problem: match &history.last_problem {

@@ -1,6 +1,6 @@
 //! Battery percentage and remaining-days estimate from voltage readings.
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::history::Reading;
 
@@ -64,20 +64,33 @@ fn median(mut values: Vec<f64>) -> f64 {
     }
 }
 
-/// Battery state from the latest reading and the recent history.
-pub fn power(latest: Option<&Reading>, readings: &[Reading]) -> Power {
-    if latest.is_some_and(|r| r.battery_v == Some(0.0)) {
-        return Power::NoBattery;
-    }
-    let mut samples: Vec<(chrono::DateTime<chrono::Utc>, f64)> = readings
+/// The latest check-in: its time and the voltage as sent.
+pub type LatestBattery = (DateTime<Utc>, Option<f64>);
+
+/// Non-zero voltage samples of `readings`, in input order.
+pub fn samples_from(readings: &[Reading]) -> Vec<(DateTime<Utc>, f64)> {
+    readings
         .iter()
         .filter_map(|r| r.battery_v.filter(|v| *v != 0.0).map(|v| (r.at, v)))
-        .collect();
-    if let Some(r) = latest
-        && let Some(v) = r.battery_v.filter(|v| *v != 0.0)
-        && !readings.iter().any(|x| x.at == r.at)
+        .collect()
+}
+
+pub fn latest_from(r: Option<&Reading>) -> Option<LatestBattery> {
+    r.map(|r| (r.at, r.battery_v))
+}
+
+/// Battery state from the latest check-in and the recent samples (non-zero
+/// volts, sorted by time).
+pub fn power(latest: Option<LatestBattery>, samples: &[(DateTime<Utc>, f64)]) -> Power {
+    if latest.is_some_and(|(_, v)| v == Some(0.0)) {
+        return Power::NoBattery;
+    }
+    let mut samples = samples.to_vec();
+    if let Some((at, v)) = latest
+        && let Some(v) = v.filter(|v| *v != 0.0)
+        && !samples.iter().any(|x| x.0 == at)
     {
-        samples.push((r.at, v));
+        samples.push((at, v));
     }
     samples.sort_by_key(|s| s.0);
     if samples.is_empty() {
@@ -184,7 +197,7 @@ mod tests {
             reading(1, Some(3.50)),
             reading(0, Some(3.90)),
         ];
-        match power(r.last(), &r) {
+        match power(latest_from(r.last()), &samples_from(&r)) {
             Power::Battery { volts, .. } => assert!((volts - 3.90).abs() < 1e-9),
             p => panic!("{p:?}"),
         }
@@ -193,7 +206,7 @@ mod tests {
     #[test]
     fn steady_drain_gives_days_left() {
         let r = series(96, |h| 4.00 - 0.20 * h as f64 / 96.0);
-        match power(r.last(), &r) {
+        match power(latest_from(r.last()), &samples_from(&r)) {
             Power::Battery {
                 estimate: Estimate::DaysLeft(d),
                 ..
@@ -205,7 +218,7 @@ mod tests {
     #[test]
     fn too_little_history_is_collecting() {
         let r = series(30, |h| 4.00 - 0.01 * h as f64 / 30.0);
-        match power(r.last(), &r) {
+        match power(latest_from(r.last()), &samples_from(&r)) {
             Power::Battery { estimate, .. } => {
                 assert_eq!(estimate, Estimate::Collecting { hours: 30 })
             }
@@ -217,7 +230,7 @@ mod tests {
     fn flat_or_rising_is_collecting() {
         let r = series(96, |_| 3.90);
         assert!(matches!(
-            power(r.last(), &r),
+            power(latest_from(r.last()), &samples_from(&r)),
             Power::Battery {
                 estimate: Estimate::Collecting { .. },
                 ..
@@ -232,7 +245,7 @@ mod tests {
         r.truncate(r.len() - 11);
         let full = |h: i64| reading(h, Some(4.20 - 0.001 * (10 - h) as f64));
         r.extend((0..=10).rev().map(full));
-        match power(r.last(), &r) {
+        match power(latest_from(r.last()), &samples_from(&r)) {
             Power::Battery { estimate, .. } => {
                 assert_eq!(estimate, Estimate::Collecting { hours: 10 })
             }
@@ -244,7 +257,7 @@ mod tests {
     fn single_low_reading_does_not_restart_window() {
         let mut r = series(96, |h| 4.00 - 0.20 * h as f64 / 96.0);
         r[48].battery_v = Some(3.40);
-        match power(r.last(), &r) {
+        match power(latest_from(r.last()), &samples_from(&r)) {
             Power::Battery {
                 estimate: Estimate::DaysLeft(d),
                 ..
@@ -258,7 +271,7 @@ mod tests {
         let mut r = series(96, |h| 4.00 - 0.20 * h as f64 / 96.0);
         r[95].battery_v = Some(4.20);
         assert!(matches!(
-            power(r.last(), &r),
+            power(latest_from(r.last()), &samples_from(&r)),
             Power::Battery {
                 estimate: Estimate::DaysLeft(_),
                 ..
@@ -269,12 +282,15 @@ mod tests {
     #[test]
     fn zero_volts() {
         let r = vec![reading(1, Some(3.9)), reading(0, Some(0.0))];
-        assert_eq!(power(r.last(), &r), Power::NoBattery);
+        assert_eq!(
+            power(latest_from(r.last()), &samples_from(&r)),
+            Power::NoBattery
+        );
 
         let mut r = series(96, |h| 4.00 - 0.20 * h as f64 / 96.0);
         r[40].battery_v = Some(0.0);
         assert!(matches!(
-            power(r.last(), &r),
+            power(latest_from(r.last()), &samples_from(&r)),
             Power::Battery {
                 estimate: Estimate::DaysLeft(_),
                 ..
@@ -287,9 +303,29 @@ mod tests {
             reading(1, Some(3.9)),
         ];
         let latest = reading(0, None);
-        assert!(matches!(power(Some(&latest), &r), Power::Battery { .. }));
+        assert!(matches!(
+            power(latest_from(Some(&latest)), &samples_from(&r)),
+            Power::Battery { .. }
+        ));
 
-        assert_eq!(power(None, &[]), Power::NoData);
-        assert_eq!(power(Some(&latest), &[]), Power::NoData);
+        assert_eq!(power(latest_from(None), &samples_from(&[])), Power::NoData);
+        assert_eq!(
+            power(latest_from(Some(&latest)), &samples_from(&[])),
+            Power::NoData
+        );
+    }
+
+    #[test]
+    fn latest_zero_then_missing() {
+        let r = series(10, |_| 3.9);
+        let t = now() + Duration::hours(1);
+        assert_eq!(
+            power(Some((t, Some(0.0))), &samples_from(&r)),
+            Power::NoBattery
+        );
+        assert!(matches!(
+            power(Some((t, None)), &samples_from(&r)),
+            Power::Battery { .. }
+        ));
     }
 }
