@@ -110,6 +110,10 @@ pub struct DiagView {
 }
 
 pub fn diag_view(input: DiagInput<'_>) -> DiagView {
+    diag_view_with_reading(input, None)
+}
+
+fn diag_view_with_reading(input: DiagInput<'_>, live: Option<&Reading>) -> DiagView {
     let DiagInput {
         device,
         history,
@@ -122,7 +126,7 @@ pub fn diag_view(input: DiagInput<'_>) -> DiagView {
         Ok(h) => (h, false),
         Err(_) => (DeviceHistory::default(), true),
     };
-    let latest = history.latest.as_ref();
+    let latest = live.or(history.latest.as_ref());
     let (sections, more) = budget(sections, at_given);
 
     DiagView {
@@ -324,10 +328,18 @@ fn clock(t: DateTime<Utc>, at: DateTime<Utc>, tz: Tz) -> String {
     }
 }
 
+pub fn build_live(input: DiagInput<'_>, reading: &Reading) -> View {
+    as_view(diag_view_with_reading(input, Some(reading)))
+}
+
 pub fn build(input: DiagInput<'_>) -> View {
+    as_view(diag_view(input))
+}
+
+fn as_view(view: DiagView) -> View {
     View {
         template: DIAG_TEMPLATE,
-        context: minijinja::Value::from_serialize(diag_view(input)),
+        context: minijinja::Value::from_serialize(view),
     }
 }
 
@@ -344,6 +356,7 @@ mod tests {
             api_key: "k".into(),
             dashboard: "family".into(),
             bit_depth: BitDepth::Two,
+            diagnostics_button: false,
         }
     }
 

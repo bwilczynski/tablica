@@ -91,6 +91,7 @@ pub struct Device {
     /// Name of an active dashboard entry.
     pub dashboard: String,
     pub bit_depth: BitDepth,
+    pub diagnostics_button: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +126,7 @@ impl std::fmt::Debug for Device {
             .field("api_key", &REDACTED)
             .field("dashboard", &self.dashboard)
             .field("bit_depth", &self.bit_depth)
+            .field("diagnostics_button", &self.diagnostics_button)
             .finish()
     }
 }
@@ -171,6 +173,8 @@ struct RawDevice {
     api_key_env: Option<String>,
     dashboard: String,
     bit_depth: Option<u8>,
+    #[serde(default)]
+    diagnostics_button: bool,
 }
 
 /// Resolves secrets from files under one directory or from the environment,
@@ -308,6 +312,7 @@ pub fn load(
                 )?,
                 mac: normalize_mac(&d.name, &d.mac)?,
                 bit_depth,
+                diagnostics_button: d.diagnostics_button,
                 name: d.name,
                 dashboard: d.dashboard,
             })

@@ -22,6 +22,7 @@ struct Entry {
 pub struct ImageStore {
     /// Newest last.
     devices: Mutex<HashMap<String, VecDeque<Entry>>>,
+    diagnostics: Mutex<HashMap<String, VecDeque<Entry>>>,
 }
 
 /// First `n` lowercase hex characters of the SHA-256 of `bytes`.
@@ -48,10 +49,27 @@ impl ImageStore {
     /// dashboard, and only the timestamp tells images apart. Storing the same
     /// pixels again returns the same filename.
     pub fn put(&self, device: &str, dashboard: &str, png: Vec<u8>, now: DateTime<Utc>) -> String {
+        Self::store(&self.devices, device, dashboard, png, now)
+    }
+
+    pub(super) fn put_diagnostics(&self, device: &str, png: Vec<u8>, now: DateTime<Utc>) -> String {
+        // Digits cannot occur in a dashboard name. This prefix keeps the
+        // firmware's first 13 filename characters stable for the device.
+        Self::store(&self.diagnostics, device, "diag1", png, now)
+    }
+
+    fn store(
+        buckets: &Mutex<HashMap<String, VecDeque<Entry>>>,
+        device: &str,
+        dashboard: &str,
+        png: Vec<u8>,
+        now: DateTime<Utc>,
+    ) -> String {
         let hash = sha256_hex(&png, 64);
-        let mut devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
-        let images = devices.entry(device.to_owned()).or_default();
-        if let Some(pos) = images.iter().position(|e| e.hash == hash) {
+        let mut devices = buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(images) = devices.get_mut(device)
+            && let Some(pos) = images.iter().position(|e| e.hash == hash)
+        {
             let entry = images.remove(pos).expect("position is in range");
             let filename = entry.filename.clone();
             images.push_back(entry);
@@ -60,13 +78,15 @@ impl ImageStore {
         let prefix = format!("{dashboard}-{}-", sha256_hex(device.as_bytes(), 6));
         // Two different images in the same second still get different names.
         let mut secs = now.timestamp();
-        while images
-            .iter()
+        while devices
+            .values()
+            .flatten()
             .any(|e| e.filename == format!("{prefix}{secs}"))
         {
             secs += 1;
         }
         let filename = format!("{prefix}{secs}");
+        let images = devices.entry(device.to_owned()).or_default();
         images.push_back(Entry {
             filename: filename.clone(),
             hash,
@@ -80,12 +100,20 @@ impl ImageStore {
 
     /// The PNG stored under `filename` (without `.png`), for any device.
     pub fn get(&self, filename: &str) -> Option<Vec<u8>> {
-        let devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
-        devices
-            .values()
-            .flat_map(|images| images.iter())
-            .find(|e| e.filename == filename)
-            .map(|e| e.png.as_ref().clone())
+        self.get_with_device(filename).map(|(_, png)| png)
+    }
+
+    pub(super) fn get_with_device(&self, filename: &str) -> Option<(String, Vec<u8>)> {
+        let buckets = if filename.starts_with("diag1-") {
+            &self.diagnostics
+        } else {
+            &self.devices
+        };
+        let devices = buckets.lock().unwrap_or_else(|e| e.into_inner());
+        devices.iter().find_map(|(device, images)| {
+            let entry = images.iter().find(|e| e.filename == filename)?;
+            Some((device.clone(), entry.png.as_ref().clone()))
+        })
     }
 
     /// The filename most recently stored or re-served for `device`.
@@ -144,6 +172,21 @@ mod tests {
         let a = store.put("kitchen", "family", vec![1], at(0));
         let b = store.put("hall", "family", vec![1], at(0));
         assert_ne!(a[..13], b[..13]);
+    }
+
+    #[test]
+    fn diagnostics_keep_the_last_dashboard_even_with_identical_pixels_or_eviction() {
+        let store = ImageStore::new();
+        let dashboard = store.put("kit", "family", vec![0], at(0));
+        let first_diag = store.put_diagnostics("kit", vec![0], at(0));
+        assert_ne!(first_diag[..13], dashboard[..13]);
+        for i in 1..=9 {
+            let filename = store.put_diagnostics("kit", vec![i], at(i64::from(i)));
+            assert_eq!(filename[..13], first_diag[..13]);
+        }
+        assert!(store.get(&first_diag).is_none());
+        assert_eq!(store.latest("kit"), Some(dashboard.clone()));
+        assert_eq!(store.get(&dashboard), Some(vec![0]));
     }
 
     #[test]

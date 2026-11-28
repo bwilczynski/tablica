@@ -13,6 +13,7 @@ mac = "AA:BB:CC:DD:EE:01"
 api_key_secret = "trmnl_kitchen_key"
 dashboard = "family"
 bit_depth = 2            # 2 (default) or 1
+# diagnostics_button = true   # double-click KEY3 to toggle diagnostics on the OG DIY Kit
 
 [[device]]
 name = "office"

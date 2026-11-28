@@ -71,6 +71,14 @@ dashboard (for the family dashboard, how fresh each source is).
   optional `depth=1` or `2` and an RFC 3339 `at=` to see the history as of an earlier
   moment. The dashboard's sections are always current, whatever `at` says.
 
+On a TRMNL 7.5″ (OG) DIY Kit, set `diagnostics_button = true` in its
+`[[device]]` section and restart Tablica. Single-click KEY3 once to pick up the
+setting. Double-click KEY3 to see battery status and diagnostics. Double-click
+again or single-click to return to the dashboard, or wait two minutes for the
+automatic return.
+This uses the kit’s guest-mode button assignment. To disable it, remove the
+setting, restart Tablica and single-click KEY3 again.
+
 ### Metrics
 
 Set `metrics_listen` in `config.toml` (for example `"0.0.0.0:9101"`) to expose Prometheus
@@ -117,6 +125,17 @@ To capture Librus fixtures from a real account, run
 `tablica capture librus --config <config> --secrets-dir <dir> --out <dir>`.
 
 ## Contributing
+
+To check the diagnostics button without a device, build Tablica and the
+`TRMNL_7inch5_OG_DIY_Kit` target from the
+[TRMNL v1.8.19 firmware](https://github.com/usetrmnl/trmnl-firmware/tree/v1.8.19).
+With the [upstream simulator harness](https://github.com/usetrmnl/trmnl-firmware/blob/v1.8.19/spec/README.md)
+set up, run this from the firmware checkout's `spec/` directory:
+
+```sh
+ENVS=TRMNL_7inch5_OG_DIY_Kit:full TABLICA_BIN=/path/to/tablica/target/debug/tablica \
+  bundle exec rspec /path/to/tablica/tests/trmnl/diagnostics_spec.rb
+```
 
 The repository is a Cargo workspace:
 

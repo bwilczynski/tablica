@@ -43,7 +43,7 @@
   <div class="panels">
     <div class="panel">
       <div class="h4">POWER</div>
-      {% if unavailable %}<div class="msg">history unavailable</div>
+      {% if unavailable and no_checkin %}<div class="msg">history unavailable</div>
       {% elif no_checkin %}<div class="msg">no check-in yet</div>
       {% elif power.kind == "battery" %}
       <div class="big"><div class="num">{{ power.percent }}</div><div class="lbl">{{ power.volts }}</div>{{ tag(power.status) }}</div>
@@ -58,7 +58,7 @@
     </div>
     <div class="panel vr">
       <div class="h4">WI-FI</div>
-      {% if unavailable %}<div class="msg">history unavailable</div>
+      {% if unavailable and no_checkin %}<div class="msg">history unavailable</div>
       {% elif no_checkin %}<div class="msg">no check-in yet</div>
       {% else %}
       {% if wifi %}
