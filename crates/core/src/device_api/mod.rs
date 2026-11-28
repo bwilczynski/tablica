@@ -27,6 +27,7 @@ use crate::config::{BitDepth, Config, Device};
 use crate::dashboard::Active;
 use crate::diagnostics::view::{DiagInput, build};
 use crate::history::{History, READ_DEADLINE};
+use crate::metrics::{Recorder, RenderKind};
 use crate::render::Renderer;
 use access_log::Access;
 pub use images::ImageStore;
@@ -45,6 +46,8 @@ pub struct AppState {
     pub history: Arc<History>,
     /// Serialises diagnostics history reads: at most one at a time.
     pub diag_reads: Arc<Semaphore>,
+    /// Prometheus instruments; recording never fails or waits on I/O.
+    pub recorder: Recorder,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -90,11 +93,19 @@ async fn render_blocking(
     name: &str,
     now: DateTime<Utc>,
     depth: BitDepth,
+    kind: RenderKind,
 ) -> anyhow::Result<Vec<u8>> {
-    let (state, name) = (state.clone(), name.to_owned());
-    tokio::task::spawn_blocking(move || render_dashboard(&state, &name, now, depth))
-        .await
-        .context("render task failed")?
+    let started = Instant::now();
+    let (task_state, task_name) = (state.clone(), name.to_owned());
+    let result =
+        tokio::task::spawn_blocking(move || render_dashboard(&task_state, &task_name, now, depth))
+            .await
+            .context("render task failed")
+            .and_then(|r| r);
+    state
+        .recorder
+        .render(name, kind, started.elapsed(), result.is_ok());
+    result
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -178,7 +189,8 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
     let dashboard = device.dashboard.as_str();
     let mut reading = telemetry::reading(&device.mac, now, &headers);
     let started = Instant::now();
-    let rendered = render_blocking(&state, dashboard, now, device.bit_depth).await;
+    let rendered =
+        render_blocking(&state, dashboard, now, device.bit_depth, RenderKind::Device).await;
     if rendered.is_ok() {
         reading.render_ms = Some(i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX));
     }
@@ -192,6 +204,7 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
             match state.images.latest(&device.name) {
                 Some(previous) => previous,
                 None => {
+                    state.recorder.record_reading(&device.name, &reading);
                     state.history.record_reading(reading);
                     let response = (
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -202,10 +215,8 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
                         })),
                     )
                         .into_response();
-                    let note = Access {
-                        reason: Some("render failed and no previous image".into()),
-                        ..Access::served(&device.name, None)
-                    };
+                    let note =
+                        Access::unavailable(&device.name, "render failed and no previous image");
                     return noted(response, note);
                 }
             }
@@ -220,6 +231,7 @@ async fn display(State(state): State<AppState>, headers: HeaderMap) -> Response 
     );
     let image_url = format!("{}/images/{filename}.png", base_url(&state.cfg));
     reading.next_refresh = Some(i64::from(rate));
+    state.recorder.record_reading(&device.name, &reading);
     state.history.record_reading(reading);
     let response = Json(json!({
         "status": 0,
@@ -327,7 +339,7 @@ async fn preview(
         Ok(at) => at.unwrap_or_else(|| (state.clock)()),
         Err(e) => return e.into_response(),
     };
-    match render_blocking(&state, dashboard, now, depth).await {
+    match render_blocking(&state, dashboard, now, depth, RenderKind::Preview).await {
         Ok(png) => png_response(png),
         Err(e) => {
             warn!("preview render failed: {e:#}");
@@ -411,7 +423,14 @@ async fn diag_preview(state: &AppState, q: PreviewQuery) -> Response {
     };
     let view = build(diag_input(state, device, at).await);
     let renderer = state.renderer.clone();
+    let started = Instant::now();
     let rendered = tokio::task::spawn_blocking(move || renderer.render_diag(&view, depth)).await;
+    state.recorder.render(
+        &device.dashboard,
+        RenderKind::Diag,
+        started.elapsed(),
+        matches!(rendered, Ok(Ok(_))),
+    );
     match rendered {
         Ok(Ok(png)) => png_response(png),
         Ok(Err(e)) => {
@@ -542,6 +561,10 @@ mod tests {
                 clock: Arc::new(move || fixed),
                 history,
                 diag_reads: Arc::new(Semaphore::new(1)),
+                recorder: Recorder::new(&[
+                    ("kitchen".to_owned(), "alpha".to_owned()),
+                    ("office".to_owned(), "bravo".to_owned()),
+                ]),
             },
             alpha,
         }
@@ -1165,6 +1188,98 @@ mod tests {
             assert_eq!(png_depth(&png), depth);
         }
         let (status, _, _) = send(&f.state, get("/images/alpha-00000000-1.png", &[])).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    fn encoded(state: &AppState) -> String {
+        let mut reg = prometheus_client::registry::Registry::default();
+        state.recorder.register(&mut reg);
+        let mut out = String::new();
+        prometheus_client::encoding::text::encode(&mut out, &reg).unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn display_records_request_and_device() {
+        let f = fixture();
+        let (status, _) = send_json(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = encoded(&f.state);
+        assert!(
+            text.contains(
+                "tablica_http_requests_total{route=\"/api/display\",status=\"200\",outcome=\"served\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "tablica_render_duration_seconds_count{dashboard=\"alpha\",kind=\"device\"} 1"
+            ),
+            "{text}"
+        );
+        let state = f.state.recorder.devices().get("kitchen").unwrap();
+        assert!(state.last_seen.is_some());
+    }
+
+    #[tokio::test]
+    async fn unknown_token_counts_as_refused() {
+        let f = fixture();
+        let (status, _) =
+            send_json(&f.state, get("/api/display", &[("Access-Token", "nope")])).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let text = encoded(&f.state);
+        assert!(
+            text.contains(
+                "tablica_http_requests_total{route=\"/api/display\",status=\"401\",outcome=\"refused\"} 1"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_display_counts_as_unavailable() {
+        let f = fixture();
+        f.alpha.fail_render.store(true, Ordering::SeqCst);
+        let (status, _) = send_json(
+            &f.state,
+            get("/api/display", &[("Access-Token", "kitchen-key")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let text = encoded(&f.state);
+        assert!(
+            text.contains(
+                "tablica_http_requests_total{route=\"/api/display\",status=\"503\",outcome=\"unavailable\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("outcome=\"refused\""), "{text}");
+        let state = f.state.recorder.devices().get("kitchen").unwrap();
+        assert!(state.last_reply.is_none());
+    }
+
+    #[tokio::test]
+    async fn unmatched_route_label() {
+        let f = fixture();
+        let (status, _, _) = send(&f.state, get("/nope", &[])).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let text = encoded(&f.state);
+        assert!(
+            text.contains(
+                "tablica_http_requests_total{route=\"unmatched\",status=\"404\",outcome=\"none\"} 1"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn main_router_has_no_metrics() {
+        let f = fixture();
+        let (status, _, _) = send(&f.state, get("/metrics", &[])).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

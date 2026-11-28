@@ -16,12 +16,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use axum::body::{Body, HttpBody};
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use tracing::{debug, info, warn};
 
 use super::{AppState, authenticate, header_str};
+use crate::metrics::HttpOutcome;
 
 /// What a handler tells the access log about the request it answered.
 #[derive(Clone, Default)]
@@ -32,6 +33,8 @@ pub(super) struct Access {
     pub reason: Option<String>,
     /// The image URL handed to the device.
     pub image_url: Option<String>,
+    /// How the request counts in the HTTP metrics.
+    pub outcome: HttpOutcome,
 }
 
 impl Access {
@@ -40,13 +43,25 @@ impl Access {
             device: Some(device.to_owned()),
             reason: None,
             image_url,
+            outcome: HttpOutcome::Served,
         }
     }
 
     pub fn refused(reason: impl Into<String>) -> Self {
         Self {
             reason: Some(reason.into()),
+            outcome: HttpOutcome::Refused,
             ..Self::default()
+        }
+    }
+
+    /// The device was known but could not be served (e.g. no image to show).
+    pub fn unavailable(device: &str, reason: impl Into<String>) -> Self {
+        Self {
+            device: Some(device.to_owned()),
+            reason: Some(reason.into()),
+            image_url: None,
+            outcome: HttpOutcome::Unavailable,
         }
     }
 }
@@ -101,6 +116,10 @@ pub(super) async fn layer(
     let path = req.uri().path().to_owned();
     let headers = req.headers().clone();
     let (peer, client) = addresses(&req);
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| "unmatched".to_owned(), |m| m.as_str().to_owned());
 
     let response = next.run(req).await;
 
@@ -116,7 +135,12 @@ pub(super) async fn layer(
     let image_url = note.and_then(|n| n.image_url.as_deref());
     let status = response.status();
     let bytes = response.body().size_hint().exact();
-    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let elapsed = started.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let outcome = note.map_or(HttpOutcome::None, |n| n.outcome);
+    state
+        .recorder
+        .http(&route, status.as_u16(), outcome, elapsed);
 
     macro_rules! access {
         ($level:ident) => {

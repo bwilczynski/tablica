@@ -133,6 +133,7 @@ fn state(data_dir: &Path, templates: TemplateSource) -> AppState {
         clock: Arc::new(move || fixed),
         history: Arc::new(History::disabled()),
         diag_reads: Arc::new(tokio::sync::Semaphore::new(1)),
+        recorder: tablica_core::metrics::Recorder::new(&[]),
     }
 }
 

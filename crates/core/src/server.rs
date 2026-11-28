@@ -48,6 +48,12 @@ pub fn prepare_state(
     }
     let renderer = Arc::new(Renderer::new(templates, &active).context("building the renderer")?);
     let history = Arc::new(History::open(&cfg.data_dir, clock.clone()));
+    let device_dashboards: Vec<(String, String)> = cfg
+        .devices
+        .iter()
+        .map(|d| (d.name.clone(), d.dashboard.clone()))
+        .collect();
+    let recorder = Recorder::new(&device_dashboards);
     let state = AppState {
         cfg,
         dashboards: Arc::new(active),
@@ -55,6 +61,7 @@ pub fn prepare_state(
         images: Arc::new(ImageStore::new()),
         history,
         diag_reads: Arc::new(Semaphore::new(1)),
+        recorder,
         clock,
     };
     Ok((state, ordered))
@@ -85,12 +92,7 @@ where
         .await
         .with_context(|| format!("binding {}", cfg.listen))?;
     let stop = CancellationToken::new();
-    let device_dashboards: Vec<(String, String)> = cfg
-        .devices
-        .iter()
-        .map(|d| (d.name.clone(), d.dashboard.clone()))
-        .collect();
-    let recorder = Recorder::new(&device_dashboards);
+    let recorder = state.recorder.clone();
     let pollers: Vec<_> = dashboards
         .into_iter()
         .flat_map(|d| d.spawn_pollers(stop.clone(), recorder.clone()))
