@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveTime, Utc};
+use chrono::{DateTime, Duration, NaiveTime, Utc};
 use chrono_tz::Tz;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::cache::{CacheStatus, is_stale};
 use crate::config::{ConfigError, Secrets};
 use crate::diagnostics::Section;
 
@@ -58,6 +59,36 @@ pub trait Dashboard: Send + Sync {
     /// Sections for the device diagnostics screen. Reads caches only.
     fn diagnostics(&self, _now: DateTime<Utc>) -> Vec<Section> {
         Vec::new()
+    }
+    /// Per-source freshness for metrics. Reads caches only.
+    fn sources(&self, _now: DateTime<Utc>) -> Vec<SourceState> {
+        Vec::new()
+    }
+}
+
+/// One source's state at scrape time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceState {
+    pub id: String,
+    pub last_success: Option<DateTime<Utc>>,
+    pub failing: bool,
+    pub stale: bool,
+}
+
+impl SourceState {
+    /// Stale when nothing was ever fetched or the data is older than `max_age`.
+    pub fn from_status(
+        id: impl Into<String>,
+        s: CacheStatus,
+        now: DateTime<Utc>,
+        max_age: Duration,
+    ) -> SourceState {
+        SourceState {
+            id: id.into(),
+            last_success: s.fetched_at,
+            failing: s.failing,
+            stale: s.fetched_at.is_none_or(|t| is_stale(t, now, max_age)),
+        }
     }
 }
 
@@ -142,5 +173,27 @@ mod tests {
         }
         // Longer than 7 characters, so name-length validation never reaches it.
         assert!(RESERVED.contains(&"metrics_listen"));
+    }
+
+    #[test]
+    fn source_state_stale_rules() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 11, 25, 12, 0, 0).unwrap();
+        let max = Duration::hours(2);
+        let state = |fetched_at| {
+            SourceState::from_status(
+                "x",
+                CacheStatus {
+                    fetched_at,
+                    failing: false,
+                },
+                now,
+                max,
+            )
+        };
+        assert!(state(None).stale);
+        assert_eq!(state(None).last_success, None);
+        assert!(state(Some(now - Duration::hours(3))).stale);
+        assert!(!state(Some(now - Duration::hours(1))).stale);
     }
 }

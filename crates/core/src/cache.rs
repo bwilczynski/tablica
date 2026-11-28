@@ -20,6 +20,14 @@ struct Inner<T> {
     error: Option<(DateTime<Utc>, String)>,
 }
 
+/// A source's freshness without its payload.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CacheStatus {
+    pub fetched_at: Option<DateTime<Utc>>,
+    /// True while the last refresh failed and no success has followed.
+    pub failing: bool,
+}
+
 /// Last good data of one source, mirrored to a JSON file.
 ///
 /// Errors are kept in memory only.
@@ -81,6 +89,15 @@ impl<T: Serialize + DeserializeOwned + Clone> SourceCache<T> {
 
     pub fn last_error(&self) -> Option<(DateTime<Utc>, String)> {
         self.read().error.clone()
+    }
+
+    /// Freshness and failure state under one read lock; clones no payload.
+    pub fn status(&self) -> CacheStatus {
+        let inner = self.read();
+        CacheStatus {
+            fetched_at: inner.stamped.as_ref().map(|s| s.fetched_at),
+            failing: inner.error.is_some(),
+        }
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Inner<T>> {
@@ -191,5 +208,22 @@ mod tests {
     fn cache_is_send_sync() {
         fn assert_ss<X: Send + Sync>() {}
         assert_ss::<SourceCache<Vec<String>>>();
+    }
+
+    #[test]
+    fn status_reflects_put_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SourceCache::<Vec<String>>::open(dir.path().join("c.json"));
+        let status = |f, failing| CacheStatus {
+            fetched_at: f,
+            failing,
+        };
+        assert_eq!(cache.status(), status(None, false));
+        cache.put(vec![], t(1)).unwrap();
+        assert_eq!(cache.status(), status(Some(t(1)), false));
+        cache.record_error("boom".to_owned(), t(2));
+        assert_eq!(cache.status(), status(Some(t(1)), true));
+        cache.put(vec![], t(3)).unwrap();
+        assert_eq!(cache.status(), status(Some(t(3)), false));
     }
 }

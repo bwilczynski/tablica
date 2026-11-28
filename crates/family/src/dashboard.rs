@@ -23,7 +23,7 @@ use crate::view::{self, FamilyInputs};
 use tablica_core::cache::{SourceCache, source_health};
 use tablica_core::config::{Loaded, Secrets};
 use tablica_core::dashboard::{
-    Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, View,
+    Dashboard, DashboardEntry, ParseResult, ParsedDashboard, PrepareContext, SourceState, View,
 };
 use tablica_core::diagnostics::{Section, source_row};
 use tablica_core::polling::{IntervalPolicy, run_poller};
@@ -219,6 +219,28 @@ impl Dashboard for FamilyDashboard {
             rows,
         }]
     }
+
+    fn sources(&self, now: DateTime<Utc>) -> Vec<SourceState> {
+        let caches = &self.caches;
+        let mut out = vec![
+            SourceState::from_status("calendar", caches.calendar.status(), now, CALENDAR_MAX_AGE),
+            SourceState::from_status("weather", caches.weather.status(), now, WEATHER_MAX_AGE),
+        ];
+        for (i, cache) in caches.timetables.iter().enumerate() {
+            out.push(SourceState::from_status(
+                timetable_source_id(i),
+                cache.status(),
+                now,
+                TIMETABLE_MAX_AGE,
+            ));
+        }
+        out
+    }
+}
+
+/// Metrics id of the timetable source for the kid at `index` (0-based).
+pub fn timetable_source_id(index: usize) -> String {
+    format!("timetable-kid{}", index + 1)
 }
 
 /// External endpoints; tests point them at mock servers.
@@ -322,6 +344,22 @@ mod tests {
         let labels: Vec<_> = sections[0].rows.iter().map(|r| r.label.clone()).collect();
         assert_eq!(labels, expected);
         assert!(sections[0].rows.iter().all(|r| r.status == Status::Bad));
+    }
+
+    #[test]
+    fn sources_lists_every_source_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let family = dashboard_in(&dir, false);
+        let sources = family.sources(Utc::now());
+        let ids: Vec<_> = sources.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["calendar", "weather", "timetable-kid1", "timetable-kid2"]
+        );
+        for kid in &family.cfg.kids {
+            assert!(ids.iter().all(|id| !id.contains(&kid.label)));
+        }
+        assert!(sources.iter().all(|s| s.stale && !s.failing));
     }
 
     #[test]
