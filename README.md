@@ -71,6 +71,30 @@ dashboard (for the family dashboard, how fresh each source is).
   optional `depth=1` or `2` and an RFC 3339 `at=` to see the history as of an earlier
   moment. The dashboard's sections are always current, whatever `at` says.
 
+### Metrics
+
+Set `metrics_listen` in `config.toml` (for example `"0.0.0.0:9101"`) to expose Prometheus
+metrics. Without it there is no metrics listener. It must differ from `listen`.
+
+- **Trust boundary:** the metrics listener serves only `GET /metrics`, and the main
+  listener has no `/metrics`. In the container the port is not published or proxied, so
+  it is reachable by containers on the Docker networks tablica joins and by the Docker
+  host, not by the LAN or tailnet. It is not exclusive to Prometheus. Joining the
+  `monitoring` network also makes the main API on port 8080 reachable by peers on that
+  network; everything it serves is already reachable from the LAN and tailnet through
+  the DSM proxy.
+- **What is exported:** device names; device model and firmware; battery, Wi-Fi signal
+  (RSSI), resets and the check-in schedule (last seen, next check-in); source health
+  and fetch outcomes and durations, labelled by opaque source ids (`calendar`,
+  `timetable-kid{N}` and so on); HTTP request and render counts and durations; the
+  history store; and build and process stats. No MACs, secrets or error text. Anyone
+  who can reach the metrics port, as above, can read them.
+- **First scrape:** the reset, fetch, problem-request and render-failure counters start
+  at zero, so `increase()` sees their first event. One that happens before
+  Prometheus's first scrape of a freshly started process can still be missed.
+- **Dashboard:** `contrib/grafana/tablica.json` is a Grafana dashboard for it (datasource
+  named `Prometheus`, queries scoped to `job="tablica"`).
+
 ### Planned
 
 - **Homelab dashboard:** a device can already be pointed at it, but it shows a
@@ -112,7 +136,7 @@ mise run test    # cargo test --workspace
 1. Create `crates/<name>`, with a name of 5 to 7 lowercase letters. Copy `crates/homelab`
    for the shape: `Cargo.toml`, a `build.rs` that embeds `templates/`, and `src/lib.rs`.
    The name must be unique and not one of `timezone`, `base_url`, `listen`, `data_dir`,
-   `schedule` or `device`.
+   `schedule`, `device` or `metrics_listen`.
 2. Construct a `DashboardEntry` and implement `ParsedDashboard` and `Dashboard` from
    `tablica-core`, and export an `entry()` function:
    - parsing the `[<name>]` config section happens offline;
@@ -122,7 +146,10 @@ mise run test    # cargo test --workspace
 3. Optionally override `Dashboard::diagnostics` to list what the dashboard knows about
    its sources on the diagnostics screen. Use `diagnostics::source_row` to turn a source's
    cache into a row with its age and status.
-4. Add the crate as a dependency of `crates/tablica` and add its `entry()` to `entries()`
+4. Optionally override `Dashboard::sources` to expose source freshness metrics. Pollers
+   pass `recorder.source(<entry name>, <id>)` to `run_poller`, and those ids must match
+   the ids `sources()` returns. Use opaque ids, never user-facing labels.
+5. Add the crate as a dependency of `crates/tablica` and add its `entry()` to `entries()`
    in `crates/tablica/src/main.rs`.
 
 Caches for a new dashboard go under `data_dir/<name>/`. No release configuration is
